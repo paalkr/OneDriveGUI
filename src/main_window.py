@@ -61,7 +61,7 @@ from gui_settings_window import gui_settings_window
 import logging
 
 # from logger import logger
-from global_config import DIR_PATH, PROFILES_FILE, save_global_config
+from global_config import DIR_PATH, PROFILES_FILE, save_global_config, set_attached_check
 
 try:
     from ui.ui_login import Ui_LoginWindow
@@ -187,6 +187,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.attached_transfer_items = {}  # profile name -> {path: (list widget, direction, total)}
         self.tray_menu_signature = None
         self.dbus = OneDriveDBus(self)
+        set_attached_check(lambda profile_name: profile_name in self.attached)
         if self.dbus.start():
             for signal in (self.dbus.instance_added, self.dbus.instance_removed):
                 signal.connect(self.match_dbus_instances)

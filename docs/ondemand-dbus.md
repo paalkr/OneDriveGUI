@@ -117,8 +117,17 @@ settings use the existing editors.
 ## Caveats
 
 - `save_global_config()` rewrites the client config of every GUI profile at each GUI start
-  (upstream behaviour, with `config_backup`). That includes Files On-Demand profiles once they are
-  in the GUI's profiles file.
+  (upstream behaviour, with `config_backup`). For client-owned profiles (Files On-Demand, or
+  attached to a running client) it does not: only keys whose value differs from the file (or from
+  the default when absent) are written, by editing the file line by line (comments, order,
+  unknown keys and repeated `skip_file`/`skip_dir` lines stay; values are raw, no interpolation);
+  unchanged profiles are not touched at all. The startup save now runs after `MainWindow`, so D-Bus
+  discovery has happened. Saving settings of such a profile asks for confirmation when a key the
+  client treats as resync-relevant (`applicationChangeWhereResyncRequired()`: drive_id, sync_dir,
+  skip_file, skip_dir, skip_dotfiles, skip_symlinks, sync_business_shared_items, check_nosync,
+  skip_size) or `sync_list` changes, and shows the stop / `--resync` / start commands for the unit.
+  The client hashes the whole `sync_list` file (QuickXorHash), so it is only written when its text
+  changed.
 - The tray uses symbolic icons; how they render (colour, size) depends on the tray host
   (AppIndicator/StatusNotifier on GNOME) and needs checking on the desktop.
 - The GUI's transfer history for attached clients only knows what `GetTransfers()` showed while

@@ -11,6 +11,97 @@ from configparser import ConfigParser
 DIR_PATH = os.path.dirname(os.path.realpath(__file__))
 PROFILES_FILE = os.path.expanduser("~/.config/onedrive-gui/profiles")
 
+# Config keys whose change makes the client demand --resync
+# (applicationChangeWhereResyncRequired() in the client's src/config.d).
+RESYNC_RELEVANT_KEYS = (
+    "drive_id",
+    "sync_dir",
+    "skip_file",
+    "skip_dir",
+    "skip_dotfiles",
+    "skip_symlinks",
+    "sync_business_shared_items",
+    "check_nosync",
+    "skip_size",
+)
+
+# Same pattern as the client's configRegex; the client strips leading whitespace first.
+CONFIG_LINE = re.compile(r'^(\w+)\s*=\s*"(.*)"\s*$')
+
+# Set by the main window: returns True for profiles attached to a client running on D-Bus.
+_attached_check = None
+
+
+def set_attached_check(check):
+    global _attached_check
+    _attached_check = check
+
+
+def is_client_owned(profile_name, profile):
+    """
+    True when the client, not OneDriveGUI, owns the profile's config: Files On-Demand profiles and
+    profiles attached to a running client. Their config is only changed by minimal, line-preserving
+    edits, never rewritten.
+    """
+    from ondemand_dbus import is_ondemand_profile
+
+    return is_ondemand_profile(profile) or bool(_attached_check and _attached_check(profile_name))
+
+
+def changed_config_keys(profile):
+    """Keys whose in-memory value differs from the config file on disk (or from the default when absent)."""
+    defaults = read_config(DIR_PATH + "/resources/default_config")._sections["onedrive"]
+    config_file = os.path.expanduser(profile["config_file"].strip('"'))
+    on_disk = read_config(config_file)._sections["onedrive"] if os.path.exists(config_file) else {}
+
+    changed = {}
+    for key, value in profile["onedrive"].items():
+        if key == "__name__":
+            continue
+        if value != on_disk.get(key, defaults.get(key)):
+            changed[key] = value
+    return changed
+
+
+def write_config_minimal(config_file, changed):
+    """
+    Apply changed keys to a client config file without rewriting it: comments, order, unknown keys
+    and repeated skip_file/skip_dir lines stay as they are. A changed key replaces its first line
+    (its other lines are removed, the value is already pipe-joined); new keys are appended.
+    Values are written raw. The previous file is kept as <config>_backup, as for other profiles.
+    """
+    lines = []
+    if os.path.exists(config_file):
+        with open(config_file, "r") as f:
+            lines = f.read().splitlines(keepends=True)
+        shutil.copy2(config_file, f"{config_file}_backup")
+
+    output = []
+    written = set()
+    for line in lines:
+        match = CONFIG_LINE.match(line.strip())
+        key = match.group(1) if match else None
+        if key in changed:
+            if key not in written:
+                output.append(f"{key} = {changed[key]}\n")
+                written.add(key)
+            continue
+        output.append(line)
+
+    if output and not output[-1].endswith("\n"):
+        output[-1] += "\n"
+    for key, value in changed.items():
+        if key not in written:
+            output.append(f"{key} = {value}\n")
+
+    os.makedirs(os.path.dirname(config_file), exist_ok=True)
+    temporary = f"{config_file}.onedrive-gui.tmp"
+    with open(temporary, "w") as f:
+        f.writelines(output)
+    if os.path.exists(config_file):
+        shutil.copymode(config_file, temporary)
+    os.replace(temporary, config_file)
+
 
 def create_global_config():
     """
@@ -117,6 +208,15 @@ def save_global_config(global_config):
     for profile in global_config:
         # Save OneDrive config changes
         od_config_file = os.path.expanduser(global_config[profile]["config_file"].strip('"'))
+
+        if is_client_owned(profile, global_config[profile]):
+            changed = changed_config_keys(global_config[profile])
+            if changed:
+                write_config_minimal(od_config_file, changed)
+                logging.info(f"{profile} config updated in place: {', '.join(changed)}")
+            else:
+                logging.debug(f"{profile} config unchanged, not rewritten")
+            continue
 
         _od_config = {}
         _od_config["onedrive"] = global_config[profile]["onedrive"]

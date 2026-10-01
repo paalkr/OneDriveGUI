@@ -440,5 +440,149 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(decision, "spawn")
 
 
+CLIENT_CONFIG = """# hand-written comment, keep me
+sync_dir = "{mount}"
+skip_file = "~*|.~*"
+# second skip_file line below
+skip_file = "*.tmp|*.swp|*.partial"
+monitor_interval = "300"
+skip_dotfiles = "false"
+on_demand_thumbnails = "false"
+log_dir = "/tmp/100%_logs"
+"""
+
+
+class ConfigGuardTests(unittest.TestCase):
+    """save_global_config() and the settings page on copies of client configs in the temp HOME."""
+
+    @classmethod
+    def setUpClass(cls):
+        import main_window  # noqa: F401 (builds the settings window and its pages)
+        import global_config as gc
+        import profile_settings_window as psw
+
+        cls.gc = gc
+        cls.psw = psw
+
+    def make_profile(self, name, ondemand_marker):
+        confdir = os.path.join(HOME, ".config", name)
+        os.makedirs(confdir, exist_ok=True)
+        if ondemand_marker:
+            os.makedirs(os.path.join(confdir, "ondemand"), exist_ok=True)
+        config_file = os.path.join(confdir, "config")
+        with open(config_file, "w") as f:
+            f.write(CLIENT_CONFIG.format(mount=os.path.join(HOME, name + "-mount")))
+        with open(os.path.join(confdir, "sync_list"), "w") as f:
+            f.write("/Documents\n# comment\n/Photos/2026\n")
+        profile = {"config_file": config_file, "auto_sync": "False", "account_type": "", "free_space": ""}
+        profile["onedrive"] = dict(self.gc.read_config(self.gc.DIR_PATH + "/resources/default_config")._sections["onedrive"])
+        profile["onedrive"].update(self.gc.read_config(config_file)._sections["onedrive"])
+        return profile
+
+    def read(self, profile):
+        with open(profile["config_file"]) as f:
+            return f.read()
+
+    def test_startup_save_skips_ondemand_and_attached_profiles(self):
+        ondemand = self.make_profile("guard-ondemand", ondemand_marker=True)
+        attached = self.make_profile("guard-attached", ondemand_marker=False)
+        plain = self.make_profile("guard-plain", ondemand_marker=False)
+        before = {name: self.read(p) for name, p in (("o", ondemand), ("a", attached), ("p", plain))}
+        self.gc.set_attached_check(lambda name: name == "guard-attached")
+        try:
+            # plain has no '%' so the upstream rewrite can run for it
+            with open(plain["config_file"], "w") as f:
+                f.write(before["p"].replace("/tmp/100%_logs", "/tmp/logs"))
+            plain["onedrive"]["log_dir"] = '"/tmp/logs"'
+            self.gc.save_global_config({"guard-ondemand": ondemand, "guard-attached": attached, "guard-plain": plain})
+        finally:
+            self.gc.set_attached_check(None)
+        self.assertEqual(self.read(ondemand), before["o"])
+        self.assertEqual(self.read(attached), before["a"])
+        self.assertFalse(os.path.exists(ondemand["config_file"] + "_backup"))
+        self.assertFalse(os.path.exists(attached["config_file"] + "_backup"))
+        self.assertNotIn("# hand-written comment", self.read(plain))  # upstream rewrite, unchanged behaviour
+
+    def test_minimal_diff_save(self):
+        profile = self.make_profile("guard-diff", ondemand_marker=True)
+        before = self.read(profile)
+        profile["onedrive"]["monitor_interval"] = '"600"'
+        profile["onedrive"]["skip_dir"] = '"Cache|node_modules"'
+        profile["onedrive"]["skip_dotfiles"] = '"false"'  # unchanged, equals a GUI default: must stay
+        self.gc.save_global_config({"guard-diff": profile})
+        after = self.read(profile)
+        expected = before.replace('monitor_interval = "300"', 'monitor_interval = "600"') + 'skip_dir = "Cache|node_modules"\n'
+        self.assertEqual(after, expected)
+        with open(profile["config_file"] + "_backup") as f:
+            self.assertEqual(f.read(), before)
+
+        # Changing skip_file replaces its first line and drops the repeated one (value is pipe-joined).
+        profile["onedrive"]["skip_file"] = '"~*|.~*|*.tmp"'
+        self.gc.save_global_config({"guard-diff": profile})
+        after = self.read(profile)
+        self.assertEqual(after.count("skip_file"), 2)  # the comment line mentions it once
+        self.assertIn('skip_file = "~*|.~*|*.tmp"\n# second skip_file line below\nmonitor_interval', after)
+        self.assertIn('log_dir = "/tmp/100%_logs"', after)
+        self.assertTrue(after.startswith("# hand-written comment, keep me\n"))
+
+    def settings_page(self, name):
+        profile = self.make_profile(name, ondemand_marker=True)
+        global_config = self.main_window_globals()
+        global_config[name] = profile
+        import copy
+
+        self.psw.temp_global_config[name] = copy.deepcopy(profile)
+        page = self.psw.ProfileSettingsPage(name)
+        return page, profile
+
+    def main_window_globals(self):
+        from options import global_config
+
+        return global_config
+
+    def test_resync_warning_for_relevant_keys_and_sync_list(self):
+        from unittest import mock
+
+        page, profile = self.settings_page("guard-page")
+        sync_list = os.path.join(os.path.dirname(profile["config_file"]), "sync_list")
+        with open(sync_list) as f:
+            sync_list_before = f.read()
+        try:
+            with mock.patch.object(self.psw.QMessageBox, "question", return_value=self.psw.QMessageBox.No) as question:
+                # Unchanged sync_list text round-trips through the editor and is not rewritten.
+                self.assertFalse(page.sync_list_changed())
+                page.temp_profile_config["onedrive"]["monitor_interval"] = '"900"'
+                page.save_clicked()
+                question.assert_not_called()
+                self.assertIn('monitor_interval = "900"', self.read(profile))
+                with open(sync_list) as f:
+                    self.assertEqual(f.read(), sync_list_before)
+
+                page.temp_profile_config["onedrive"]["sync_dir"] = '"~/Elsewhere"'
+                page.save_clicked()
+                question.assert_called_once()
+                message = question.call_args[0][2]
+                self.assertIn("sync_dir", message)
+                self.assertIn("--resync", message)
+                self.assertIn("systemctl --user stop onedrive-ondemand@guard-page.service", message)
+                self.assertIn("--monitor --on-demand --resync --resync-auth", message)
+                self.assertNotIn("Elsewhere", self.read(profile))  # declined: nothing written
+
+                page.temp_profile_config["onedrive"]["sync_dir"] = profile["onedrive"]["sync_dir"]
+                page.textEdit_sync_list.setPlainText(sync_list_before + "/Music\n")
+                question.reset_mock()
+                page.save_clicked()
+                self.assertIn("sync_list", question.call_args[0][2])
+                with open(sync_list) as f:
+                    self.assertEqual(f.read(), sync_list_before)
+
+            with mock.patch.object(self.psw.QMessageBox, "question", return_value=self.psw.QMessageBox.Yes):
+                page.save_clicked()
+            with open(sync_list) as f:
+                self.assertEqual(f.read(), sync_list_before + "/Music\n")
+        finally:
+            self.main_window_globals().pop("guard-page", None)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

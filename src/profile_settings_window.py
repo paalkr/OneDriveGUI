@@ -23,7 +23,8 @@ from configparser import ConfigParser
 
 # Import setup_wizard after importing wizard, keeping it at the bottom to avoid circular imports
 import wizard
-from global_config import save_global_config
+from global_config import RESYNC_RELEVANT_KEYS, changed_config_keys, is_client_owned, save_global_config
+from ondemand_dbus import is_ondemand_profile, profile_confdir, profile_systemd_unit
 
 # Import main_window (lazy import to avoid circular references)
 import main_window
@@ -279,8 +280,7 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
 
         # Buttons
         self.pushButton_discard.clicked.connect(self.discard_changes)
-        self.pushButton_save.clicked.connect(self.save_profile_settings)
-        self.pushButton_save.clicked.connect(self.save_sync_list)
+        self.pushButton_save.clicked.connect(self.save_clicked)
 
         # Time which periodically checks for unsaved changes.
         self.timer_unsaved_changes = QTimer()
@@ -582,8 +582,68 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
     def save_sync_list(self):
         self.sync_list_new = self.textEdit_sync_list.toPlainText()
 
+        if is_client_owned(self.profile, global_config[self.profile]) and not self.sync_list_changed():
+            # The client hashes the whole file: rewriting identical text, or creating an empty
+            # file, would still count as a sync_list change and demand --resync.
+            return
+
         with open(self.sync_list_file, "w") as f:
             f.write(self.sync_list_new)
+
+    def sync_list_changed(self):
+        new_text = self.textEdit_sync_list.toPlainText()
+        if not os.path.exists(self.sync_list_file):
+            return new_text != ""
+        return self.read_sync_list() != new_text
+
+    def save_clicked(self):
+        if is_client_owned(self.profile, global_config[self.profile]) and not self.confirm_resync_relevant_changes():
+            logging.info(f"[{self.profile}] Saving cancelled: resync-relevant change not confirmed")
+            return
+        self.save_profile_settings()
+        self.save_sync_list()
+
+    def resync_relevant_changes(self):
+        changes = [key for key in changed_config_keys(self.temp_profile_config) if key in RESYNC_RELEVANT_KEYS]
+        if self.sync_list_changed():
+            changes.append("sync_list")
+        return changes
+
+    def confirm_resync_relevant_changes(self):
+        """
+        For profiles whose client runs outside the GUI: warn before saving changes after which the
+        client refuses to sync until it is run once with --resync.
+        """
+        changes = self.resync_relevant_changes()
+        if not changes:
+            return True
+
+        text = (
+            f"Changing <b>{', '.join(changes)}</b> makes the OneDrive client for profile <b>{self.profile}</b> "
+            "stop at its next start until it has been run once with <tt>--resync</tt>. "
+            "A resync rebuilds the local state from OneDrive."
+        )
+        profile = global_config[self.profile]
+        unit = profile_systemd_unit(profile)
+        if is_ondemand_profile(profile) and unit:
+            confdir = profile_confdir(profile)
+            text += (
+                "<br><br>After saving, restart the service with a resync:<br>"
+                f"<tt>systemctl --user stop {unit}</tt><br>"
+                f"<tt>onedrive --confdir={confdir} --monitor --on-demand --resync --resync-auth</tt><br>"
+                "(stop it with Ctrl+C once the synchronisation has completed)<br>"
+                f"<tt>systemctl --user start {unit}</tt>"
+            )
+        text += "<br><br>Save the changes?"
+
+        answer = QMessageBox.question(
+            self,
+            "Resync required",
+            text,
+            buttons=QMessageBox.Yes | QMessageBox.No,
+            defaultButton=QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
 
     def validate_checkbox_input(self):
         """Disables incompatible settings"""

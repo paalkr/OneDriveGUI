@@ -51,10 +51,12 @@ workers = {}
 if __name__ == "__main__":
     logging.info(f"Starting OneDriveGUI v{version}")
 
+    main_window = MainWindow()
+
+    # After MainWindow: it discovers clients on D-Bus, and the configs of profiles attached to
+    # them (or Files On-Demand profiles) must not be rewritten here.
     if len(global_config) > 0:
         save_global_config(global_config)
-
-    main_window = MainWindow()
     main_window_start_state()
 
     app.exec()
