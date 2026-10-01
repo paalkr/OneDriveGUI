@@ -859,6 +859,7 @@ class SettingsPageTests(unittest.TestCase):
 
     def test_basic_notes_say_the_rebuild_is_a_manual_step(self):
         basic = self.page("profile-a").basic_page
+        basic._automatic_resync = None  # no rebuild unit installed here
         basic.refresh()
         self.assertIn("needs a manual step after saving", basic.label_folders_note.text())
 
@@ -1170,6 +1171,117 @@ class ResyncWordingTests(unittest.TestCase):
         with mock.patch.object(self.psw.QMessageBox, "question", return_value=self.psw.QMessageBox.No) as question:
             page.save_clicked()
         self.assertIn("a rebuild of the client's local index", question.call_args[0][2])
+
+
+class AutomaticResyncTests(unittest.TestCase):
+    """Saving a resync-relevant change runs the package's rebuild unit (fake systemctl + mock D-Bus)."""
+
+    UNIT = "onedrive-ondemand-resync@profile-a.service"
+
+    @classmethod
+    def setUpClass(cls):
+        import main_window
+        import profile_settings_window as psw
+
+        cls.psw = psw
+        cls.main_window_module = main_window
+        cls.window = main_window.MainWindow()
+        cls.window.tray = QSystemTrayIcon()
+        cls.window.tray_menu = QMenu()
+        cls.window.tray_menu_signature = None
+        cls.mock = start_mock(CONFDIR_A, "--syncdir", MOUNT_A)
+
+    @classmethod
+    def tearDownClass(cls):
+        stop_mock(cls.mock)
+        cls.window.dbus.stop()
+        cls.window.refresh_process_status.stop()  # no updates from a finished test window
+
+    def setUp(self):
+        self.dir = os.path.join(HOME, "systemd")
+        os.makedirs(self.dir, exist_ok=True)
+        open(os.path.join(self.dir, self.UNIT + ".loaded"), "w").close()
+        with open(os.path.join(self.dir, "onedrive-ondemand@profile-a.service"), "w") as f:
+            f.write("active enabled")
+        self.window.unit_states.states.clear()
+        self.assertTrue(wait_until(lambda: "profile-a" in self.window.attached))
+        layout = self.psw.profile_settings_window.stackedLayout
+        self.page = next(layout.widget(i) for i in range(layout.count()) if getattr(layout.widget(i), "profile", None) == "profile-a")
+        # The Basic page connects to the main window when first shown; connect it to this test's window.
+        self.page.basic_page._connected = False
+        self.page.basic_page.showEvent(__import__("PySide6.QtGui", fromlist=["QShowEvent"]).QShowEvent())
+
+    def tearDown(self):
+        os.remove(os.path.join(self.dir, self.UNIT + ".loaded"))
+        self.page.discard_changes()
+
+    def finish_unit(self, active, result):
+        with open(os.path.join(self.dir, self.UNIT), "w") as f:
+            f.write(f"{active} disabled")
+        with open(os.path.join(self.dir, self.UNIT + ".props")) as f:
+            invocation = [line for line in f.read().splitlines() if line.startswith("InvocationID=")][0]
+        with open(os.path.join(self.dir, self.UNIT + ".props"), "w") as f:
+            f.write(f"Result={result}\n{invocation}\n")
+
+    def save_with_rebuild(self):
+        from unittest import mock
+
+        # A value differing from what an earlier test saved
+        self.skip_size = str(int(time.time() * 1000) % 100000)
+        self.page.temp_profile_config["onedrive"]["skip_size"] = f'"{self.skip_size}"'
+        progress, finished = [], []
+        self.window.resync_progress.connect(lambda profile, text: progress.append(text))
+        self.window.resync_finished.connect(lambda profile, ok, message: finished.append((ok, message)))
+        with mock.patch.object(self.psw.QMessageBox, "question", return_value=self.psw.QMessageBox.Yes) as question:
+            self.page.save_clicked()
+        return question, progress, finished
+
+    def test_rebuild_runs_and_reports_progress_and_success(self):
+        self.page.basic_page._automatic_resync = None
+        self.page.basic_page.refresh()
+        self.assertIn("OneDriveGUI then rebuilds the client's local index", self.page.basic_page.label_folders_note.text())
+
+        control(CONFDIR_A, "SetProp", "StateDetail", "<'Rebuilding the local index: 120 items'>")
+        control(CONFDIR_A, "SetProp", "PendingDownloads", "<uint32 3>")
+        question, progress, finished = self.save_with_rebuild()
+        text = question.call_args[0][2]
+        self.assertIn("Save and rebuild now?", text)
+        self.assertIn("not downloaded again; online-only files stay online-only", text)
+        self.assertIn("always keep on this device stay that way", text)
+        self.assertNotIn("--resync-auth", text)  # no manual commands
+        with open(self.page.config_file) as f:
+            self.assertIn(f'skip_size = "{self.skip_size}"', f.read())
+        with open(os.path.join(HOME, "systemctl.log")) as f:
+            self.assertIn(f"--user start --no-block {self.UNIT}", f.read())
+
+        self.assertTrue(wait_until(lambda: any("Rebuilding the local index: 120 items (3 to download)" in p for p in progress)))
+        self.assertTrue(self.window.profile_status_pages["profile-a"].label_onedrive_status.text().startswith("Rebuilding the local index"))
+        self.finish_unit("inactive", "success")
+        self.assertTrue(wait_until(lambda: finished))
+        self.assertEqual(finished[0], (True, ""))
+        self.assertEqual(self.page.basic_page.label_service.text(), "Rebuild finished.")
+        control(CONFDIR_A, "SetProp", "PendingDownloads", "<uint32 0>")
+        self.page.temp_profile_config["onedrive"].pop("skip_size", None)
+
+    def test_failed_rebuild_keeps_service_stopped_and_shows_journal(self):
+        from unittest import mock
+
+        with mock.patch.object(self.main_window_module.QMessageBox, "warning") as warning:
+            _question, _progress, finished = self.save_with_rebuild()
+            self.assertTrue(wait_until(lambda: os.path.exists(os.path.join(self.dir, self.UNIT + ".props"))))
+            self.finish_unit("failed", "exit-code")
+            self.assertTrue(wait_until(lambda: finished))
+        self.assertFalse(finished[0][0])
+        self.assertIn("exit-code", finished[0][1])
+        self.assertIn("fake failure for the test", finished[0][1])
+        message = warning.call_args[0][2]
+        self.assertIn("stays stopped", message)
+        self.assertIn("fake failure for the test", message)
+        self.assertNotIn("start --no-block onedrive-ondemand@profile-a.service", open(os.path.join(HOME, "systemctl.log")).read())
+        self.assertEqual(
+            self.window.profile_status_pages["profile-a"].label_onedrive_status.text(), "Rebuild failed: background service stopped"
+        )
+        self.page.temp_profile_config["onedrive"].pop("skip_size", None)
 
 
 class QuitBehaviourTests(unittest.TestCase):

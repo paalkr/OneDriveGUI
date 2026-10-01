@@ -82,6 +82,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     mode_indicators_changed = Signal()
     # profile, "start"/"stop", ok, message, new ActiveState
     service_action_finished = Signal(str, str, bool, str, str)
+    # profile, progress line / (profile, ok, message) of an automatic rebuild (--resync)
+    resync_progress = Signal(str, str)
+    resync_finished = Signal(str, bool, str)
 
     def __init__(self):
         # Expose this instance as main_window.main_window_instance so other modules
@@ -193,7 +196,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.unit_states = UnitStates(self)
         self.unit_states.changed.connect(lambda _unit: self.refresh_mode_indicators())
         self.mode_texts = {}
-        self.service_actions = set()  # profiles with a start/stop/restart in flight
+        self.service_actions = set()  # profiles with a start/stop/restart/rebuild in flight
+        self.resync_runners = {}
         self.status_windows = {}
         self.attached_transfer_items = {}  # profile name -> {path: (list widget, direction, total)}
         self.tray_menu_signature = None
@@ -1696,6 +1700,77 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.mode_texts = {}
         self.refresh_mode_indicators()
         self.service_action_finished.emit(profile_name, action, ok, message, active)
+
+    def resync_unit(self, profile_name):
+        """The profile's automatic rebuild unit, or "" when it is not installed or not a service profile."""
+        from ondemand_resync import resync_unit_for_profile, unit_installed
+
+        if not self.service_unit(profile_name):
+            return ""
+        unit = resync_unit_for_profile(os.path.basename(profile_confdir(global_config[profile_name])))
+        return unit if unit_installed(unit) else ""
+
+    def run_resync(self, profile_name):
+        """Start the rebuild unit and follow it until the background service is back (or stays stopped)."""
+        from ondemand_resync import ResyncRunner
+
+        unit = self.resync_unit(profile_name)
+        if not unit:
+            return False
+
+        def progress_source():
+            instance = self.attached_instance(profile_name)
+            if instance is None:
+                return ""
+            props = instance.props
+            counts = []
+            if props.get("PendingDownloads"):
+                counts.append(f"{props['PendingDownloads']} to download")
+            if props.get("PendingUploads"):
+                counts.append(f"{props['PendingUploads']} to upload")
+            detail = props.get("StateDetail", "")
+            return f"{detail} ({', '.join(counts)})" if counts else detail
+
+        runner = ResyncRunner(unit, progress_source, self)
+        self.resync_runners[profile_name] = runner
+        self.service_actions.add(profile_name)
+        page = self.profile_status_pages[profile_name]
+
+        def on_progress(text):
+            page.label_onedrive_status.setText(text)
+            self.resync_progress.emit(profile_name, text)
+
+        def on_finished(ok, message):
+            self.resync_runners.pop(profile_name, None)
+            self.service_actions.discard(profile_name)
+            service = self.service_unit(profile_name)
+            if ok:
+                logging.info(f"[{profile_name}] Rebuild with {unit} finished")
+                self.unit_states.refresh(service, force=True)
+                text = f"The local index of {profile_name} has been rebuilt; {service} runs again."
+                if self.tray:
+                    self.tray.showMessage("OneDriveGUI", text, QSystemTrayIcon.Information, 8000)
+                page.label_onedrive_status.setText("Rebuild finished")
+            else:
+                logging.warning(f"[{profile_name}] Rebuild with {unit} failed: {message}")
+                page.label_onedrive_status.setText("Rebuild failed: background service stopped")
+                QMessageBox.warning(
+                    self,
+                    "Rebuilding the local index failed",
+                    f"The rebuild of <b>{profile_name}</b> ({unit}) failed. The background service <b>{service}</b> "
+                    "stays stopped, because it would refuse to sync until a rebuild has succeeded. "
+                    "Fix the cause below, then save again or start the rebuild from a terminal with "
+                    f"<tt>onedrive-ondemand-resync {os.path.basename(profile_confdir(global_config[profile_name]))}</tt>."
+                    f"<br><br><pre>{message}</pre>",
+                )
+            self.mode_texts = {}
+            self.refresh_mode_indicators()
+            self.resync_finished.emit(profile_name, ok, message)
+
+        runner.progress.connect(on_progress)
+        runner.finished.connect(on_finished)
+        runner.start()
+        return True
 
     def start_service(self, profile_name):
         """systemctl --user start <unit>; the client re-attaches over D-Bus when it is up. No confirmation."""

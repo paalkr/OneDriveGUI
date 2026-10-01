@@ -708,6 +708,7 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
 
     def save_clicked(self):
         restart_unit = None
+        self.automatic_resync = False
         if is_client_owned(self.profile, global_config[self.profile]):
             if not self.confirm_resync_relevant_changes():
                 logging.info(f"[{self.profile}] Saving cancelled: resync-relevant change not confirmed")
@@ -718,7 +719,11 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
                 return
         self.save_profile_settings()
         self.save_sync_list()
-        if restart_unit:
+        if self.automatic_resync:
+            window = getattr(main_window, "main_window_instance", None)
+            if window is not None:
+                window.run_resync(self.profile)
+        elif restart_unit:
             window = getattr(main_window, "main_window_instance", None)
             if window is not None:
                 window.unit_states.start_stop(restart_unit, "restart", lambda ok, message, active: window.report_service_result(self.profile, "restart", ok, message, active))
@@ -775,6 +780,23 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
             return True
 
         profile = global_config[self.profile]
+        window = getattr(main_window, "main_window_instance", None)
+        resync_unit = window.resync_unit(self.profile) if window is not None and is_ondemand_profile(profile) else ""
+        if resync_unit:
+            # The package's rebuild unit is installed: OneDriveGUI runs the rebuild itself.
+            text = (
+                f"Changing <b>{', '.join(changes)}</b> needs a rebuild of the client's local index for profile "
+                f"<b>{self.profile}</b>. After saving, OneDriveGUI stops the background service, rebuilds the index "
+                f"(<tt>{resync_unit}</tt>) and starts the service again; you can follow the progress here. "
+                "The rebuild does not touch your files: files already downloaded stay on this device and are not "
+                "downloaded again; online-only files stay online-only. Files you chose to always keep on this device "
+                "stay that way. Nothing is uploaded or deleted by the rebuild itself."
+                "<br><br>Save and rebuild now?"
+            )
+            answer = QMessageBox.question(self, "Rebuild needed", text, buttons=QMessageBox.Yes | QMessageBox.No, defaultButton=QMessageBox.No)
+            self.automatic_resync = answer == QMessageBox.Yes
+            return self.automatic_resync
+
         text = (
             f"Changing <b>{', '.join(changes)}</b> makes the OneDrive client for profile <b>{self.profile}</b> "
             "stop at its next start until it has been run once with <tt>--resync</tt>. "

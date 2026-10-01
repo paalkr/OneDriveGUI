@@ -154,6 +154,11 @@ class BasicSettingsPage(QWidget):
             self._connected = True
             window.mode_indicators_changed.connect(self.refresh)
             window.service_action_finished.connect(self.service_action_finished)
+            window.resync_progress.connect(lambda profile, text: profile == self.profile and self.show_service_result(text))
+            window.resync_finished.connect(
+                lambda profile, ok, message: profile == self.profile
+                and self.show_service_result("Rebuild finished." if ok else "Rebuild failed; the background service stays stopped.")
+            )
 
     def refresh(self):
         config = self.settings_page.temp_profile_config
@@ -165,7 +170,17 @@ class BasicSettingsPage(QWidget):
         self.label_account.setText(f"{account} ({account_type.capitalize()})" if account_type and account_type != "unknown" else account)
         self.label_mode.setText(mode_text(mode, "\n"))
 
-        if mode["ondemand"]:
+        window = main_window()
+        automatic = bool(mode["ondemand"] and window is not None and self.automatic_resync_available(window))
+        if automatic:
+            rebuild = "OneDriveGUI then rebuilds the client's local index and restarts the service; downloaded files are kept."
+            self.label_folder_note.setText(
+                f"Changing the folder needs a rebuild after saving. {rebuild}"
+                if self.settings_page.is_resync_key("sync_dir")
+                else "Changing the folder moves where OneDrive appears when the service restarts (you are asked before saving)."
+            )
+            self.label_folders_note.setText(f"Changing the folder selection needs a rebuild after saving. {rebuild}")
+        elif mode["ondemand"]:
             if self.settings_page.is_resync_key("sync_dir"):
                 self.label_folder_note.setText(
                     "Changing the folder needs a manual step after saving: rebuilding the client's local index "
@@ -231,6 +246,14 @@ class BasicSettingsPage(QWidget):
                 self.label_free_space.setText("Available while the client for this profile is running.")
         self.label_free_space.setVisible(bool(mode["ondemand"]))
 
+    def automatic_resync_available(self, window):
+        """Cached for 30 s per page: asking systemd is quick, but refresh() runs often."""
+        import time
+
+        if getattr(self, "_automatic_resync", None) is None or time.time() - self._automatic_resync[1] > 30:
+            self._automatic_resync = (bool(window.resync_unit(self.profile)), time.time())
+        return self._automatic_resync[0]
+
     # Folder location (the Advanced editor's sync_dir field holds the pending value)
 
     def folder_edited(self, text):
@@ -277,6 +300,10 @@ class BasicSettingsPage(QWidget):
             self.service_busy = True
             self.service_result = ""
         self.refresh()
+
+    def show_service_result(self, text):
+        self.service_result = text
+        self.label_service.setText(text)
 
     def service_action_finished(self, profile, action, ok, message, active):
         if profile != self.profile:
