@@ -1,6 +1,7 @@
 from PySide6.QtCore import QTimer, QUrl, QFileInfo, Qt, Signal, Slot
 from PySide6.QtGui import QIcon, QPixmap, QDesktopServices
 from PySide6.QtWidgets import (
+    QPushButton,
     QWidget,
     QMainWindow,
     QMenu,
@@ -43,6 +44,18 @@ from options import (
 
 from utils.utils import humanize_file_size, shorten_path, format_relative_time
 from workers import WorkerThread, MaintenanceWorker, TaskList, workers
+from ondemand_dbus import (
+    OneDriveDBus,
+    aggregate_tray_state,
+    match_profiles,
+    profile_confdir,
+    profile_systemd_unit,
+    read_weburl,
+    start_decision,
+    tray_state,
+)
+from ondemand_ui import STATE_LABELS, OnDemandStatusWindow, file_type_icon, status_text, themed_icon, tray_icon
+from datetime import datetime
 from gui_settings_window import gui_settings_window
 
 import logging
@@ -165,30 +178,44 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if len(self.profile_status_pages) < 2:
             self.comboBox.hide()
 
+        # Clients that expose the D-Bus status interface (e.g. a Files On-Demand client run by
+        # a systemd user unit). Profiles with such a client are "attached": the GUI reads their
+        # status over D-Bus and never spawns or stops a client for them. Without jeepney or a
+        # session bus, self.dbus is None and everything below behaves as upstream.
+        self.attached = {}  # profile name -> bus name
+        self.status_windows = {}
+        self.attached_transfer_items = {}  # profile name -> {path: (list widget, direction, total)}
+        self.tray_menu_signature = None
+        self.dbus = OneDriveDBus(self)
+        if self.dbus.start():
+            for signal in (self.dbus.instance_added, self.dbus.instance_removed):
+                signal.connect(self.match_dbus_instances)
+            for signal in (self.dbus.properties_changed, self.dbus.issues_changed):
+                signal.connect(self.on_dbus_instance_changed)
+            self.dbus.transfers_changed.connect(self.on_dbus_transfers_changed)
+        else:
+            self.dbus = None
+
         # System Tray
         self.tray = QSystemTrayIcon()
         if self.tray.isSystemTrayAvailable():
             # Initial icon will be updated by update_tray_icon() after profiles are loaded
             icon = QIcon(DIR_PATH + "/resources/images/icons8-cloud-80.png")
-            menu = QMenu()
-
-            show_action = menu.addAction("Show/Hide")
-            show_action.triggered.connect(lambda: self.hide() if self.isVisible() else self.show())
-            setting_action = menu.addAction("Settings")
-            setting_action.triggered.connect(self.show_settings_window)
-            quit_action = menu.addAction("Quit")
-            quit_action.triggered.connect(lambda: self.graceful_shutdown())
+            self.tray_menu = QMenu()
+            self.refresh_tray_menu()
 
             self.tray.activated.connect(self.tray_icon_clicked)
 
             self.tray.setIcon(icon)
-            self.tray.setContextMenu(menu)
+            self.tray.setContextMenu(self.tray_menu)
             self.tray.show()
             # Initial tooltip - will be updated by update_tray_icon()
             self.tray.setToolTip("OneDriveGUI")
 
         else:
             self.tray = None
+
+        self.match_dbus_instances()
 
         # Version check results storage
         self.client_version_status = {
@@ -265,10 +292,18 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             pass
 
     def graceful_shutdown(self):
+        question = f"Would you like to stop all sync operations and quit OneDriveGUI ?"
+        external = [profile for profile in self.attached if profile not in workers]
+        if external:
+            question = (
+                "Would you like to stop the sync operations started by OneDriveGUI and quit OneDriveGUI ?<br><br>"
+                f"Clients started outside OneDriveGUI keep running: {', '.join(external)}"
+            )
+
         close_question = QMessageBox.question(
             self,
             "Quit OneDriveGUI ?",
-            f"Would you like to stop all sync operations and quit OneDriveGUI ?",
+            question,
             buttons=QMessageBox.Yes | QMessageBox.No,
             defaultButton=QMessageBox.No,
         )
@@ -277,11 +312,15 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             logging.info("Quitting OneDriveGUI")
             workers_to_stop = []
 
+            # Only workers hold clients the GUI started; attached clients are never stopped.
             for worker in workers:
                 workers_to_stop.append(worker)
 
             for worker in workers_to_stop:
                 workers[worker].stop_worker()
+
+            if self.dbus:
+                self.dbus.stop()
 
             sys.exit()
 
@@ -528,7 +567,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
             profile_status_page = self.profile_status_pages[profile_name]
 
-            if profile_name not in workers:
+            if profile_name in self.attached and profile_name not in workers:
+                self.update_attached_controls(profile_name, pixmap_running)
+
+            elif profile_name not in workers:
                 profile_status_page.label_status.setText("stopped")
                 profile_status_page.label_status.setToolTip("Sync is stopped")
                 profile_status_page.label_status.setPixmap(pixmap_stopped)
@@ -688,6 +730,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if not self.tray:
             return
 
+        if self.attached:
+            self.update_attached_tray_icon()
+            return
+
         # Get aggregated status
         overall_state, running_count, total_count, profile_statuses = self.aggregate_tray_status()
 
@@ -715,9 +761,22 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             logging.info(f"[{profile_name}] Auto-sync enabled for profile: {global_config[profile_name]['auto_sync']}")
 
             if self.profile_status_pages[profile_name].pushButton_start.isEnabled() and global_config[profile_name]["auto_sync"] == "True":
+                decision = start_decision(global_config[profile_name], profile_name in self.attached, profile_name in workers)
+                if decision != "spawn":
+                    logging.info(f"[{profile_name}] Not starting a client at GUI start: {decision}")
+                    continue
                 self.start_onedrive_monitor(profile_name)
 
     def start_onedrive_monitor(self, profile_name, options=""):
+        decision = start_decision(global_config[profile_name], profile_name in self.attached, profile_name in workers)
+        if decision == "attach":
+            # Never start a second client next to one that runs outside the GUI.
+            logging.info(f"[{profile_name}] A client is already running on D-Bus, attaching instead of starting one")
+            return
+        if decision == "service":
+            self.offer_start_service(profile_name)
+            return
+
         # Clear any previous error messages when starting sync
         self.profile_status_pages[profile_name].label_error_icon.clear()
         self.profile_status_pages[profile_name].label_error_icon.setToolTip("")
@@ -1319,6 +1378,272 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if len(global_config) < 2:
             self.comboBox.hide()
 
+    # --- Clients attached over D-Bus ---------------------------------------------
+
+    def match_dbus_instances(self, _bus_name=None):
+        """Recompute which profiles have a client on the bus (by ConfigDir)."""
+        if not self.dbus:
+            return
+        confdirs = {profile: profile_confdir(global_config[profile]) for profile in global_config}
+        attached = match_profiles(confdirs, {bus: instance.props for bus, instance in self.dbus.instances.items()})
+
+        for profile in set(self.attached) | set(attached):
+            if self.attached.get(profile) != attached.get(profile):
+                logging.info(f"[{profile}] D-Bus client: {attached.get(profile) or 'gone'}")
+        detached = set(self.attached) - set(attached)
+        self.attached = attached
+
+        for profile in detached:
+            page = self.profile_status_pages.get(profile)
+            if page:
+                page.pushButton_status.hide()
+                page.label_onedrive_status.setText("The OneDrive client for this profile is not running.")
+        for profile in attached:
+            self.update_attached_page(profile)
+            self.update_attached_transfers(profile)
+
+        self.refresh_tray_menu()
+        self.update_tray_icon()
+
+    def on_dbus_instance_changed(self, bus_name):
+        for profile, attached_bus in self.attached.items():
+            if attached_bus == bus_name:
+                self.update_attached_page(profile)
+        self.refresh_tray_menu()
+        self.update_tray_icon()
+
+    def attached_instance(self, profile_name):
+        bus_name = self.attached.get(profile_name)
+        return self.dbus.instances.get(bus_name) if self.dbus and bus_name else None
+
+    def update_attached_page(self, profile_name):
+        instance = self.attached_instance(profile_name)
+        page = self.profile_status_pages.get(profile_name)
+        if instance is None or page is None:
+            return
+        props = instance.props
+        page.pushButton_status.show()
+        page.label_onedrive_status.setText(status_text(props, instance.issues))
+        if props.get("AccountType") and props["AccountType"] != "unknown":
+            page.label_account_type.setText(props["AccountType"].capitalize())
+        if props.get("QuotaTotal"):
+            page.label_free_space.setText(humanize_file_size(props["QuotaTotal"] - props.get("QuotaUsed", 0)))
+
+    def on_dbus_transfers_changed(self, bus_name):
+        for profile, attached_bus in self.attached.items():
+            if attached_bus == bus_name:
+                self.update_attached_transfers(profile)
+
+    def update_attached_transfers(self, profile_name):
+        """
+        Show the transfers of an attached client in the profile's transfer list, like the
+        log-parsed list of a GUI-started client. A transfer that leaves GetTransfers() is
+        shown as finished, or failed if the client reports an issue for its path.
+        """
+        instance = self.attached_instance(profile_name)
+        page = self.profile_status_pages.get(profile_name)
+        if instance is None or page is None or profile_name in workers or not instance.has_capability("transfers"):
+            return
+
+        items = self.attached_transfer_items.setdefault(profile_name, {})  # path -> (widget, direction, total)
+        current = {transfer[0]: transfer for transfer in instance.transfers}
+        failed_paths = {issue[1] for issue in instance.issues if issue[3] == "attention"}
+        finished_labels = {"upload": "Uploaded to", "download": "Downloaded to", "hydrate": "Downloaded on demand to"}
+
+        for path in [path for path in items if path not in current]:
+            widget, direction, total = items.pop(path)
+            folder = os.path.dirname(path) or "OneDrive"
+            if path in failed_paths:
+                widget.set_label_1(f"{'Upload' if direction == 'upload' else 'Download'} failed")
+            else:
+                widget.set_label_1(f"{finished_labels.get(direction, 'Synced to')} {folder}")
+                widget.set_label_2(humanize_file_size(total) if total else "")
+                widget.set_progress(100)
+            widget.hide_progress_bar(True)
+            widget.set_completion_timestamp(datetime.now())
+            widget.set_timestamp(format_relative_time(widget.get_completion_timestamp()))
+
+        active_labels = {"upload": "Uploading", "download": "Downloading", "hydrate": "Downloading on demand"}
+        for path, direction, state, done, total in instance.transfers:
+            if path in items:
+                widget = items[path][0]
+            else:
+                widget = TaskList()
+                widget.set_file_name(os.path.basename(path))
+                widget.set_custom_icon(file_type_icon(path))
+                widget.set_timestamp("")
+                list_item = QListWidgetItem()
+                list_item.setSizeHint(widget.sizeHint())
+                page.listWidget.insertItem(0, list_item)
+                page.listWidget.setItemWidget(list_item, widget)
+                if page.listWidget.count() > 10_000:
+                    page.listWidget.takeItem(page.listWidget.count() - 1)
+            items[path] = (widget, direction, total)
+            widget.hide_progress_bar(False)
+            widget.set_label_1("Queued" if state == "queued" else active_labels.get(direction, direction))
+            widget.set_label_2(f"{humanize_file_size(done)} of {humanize_file_size(total)}" if total else "")
+            widget.set_progress(int(done * 100 / total) if total else 0)
+
+    def update_attached_controls(self, profile_name, pixmap_running):
+        """Status light and start/stop button of a profile whose client runs outside the GUI."""
+        page = self.profile_status_pages[profile_name]
+        instance = self.attached_instance(profile_name)
+        paused = instance is not None and instance.props.get("State") == "paused"
+
+        page.label_status.setText("running")
+        page.label_status.setToolTip("Client started outside OneDriveGUI (e.g. by systemd)")
+        page.label_status.setPixmap(pixmap_running)
+
+        # The GUI does not stop a client it did not start; the button pauses and resumes instead.
+        page.pushButton_start_stop.clicked.disconnect()
+        if instance is not None and instance.has_capability("pause"):
+            page.pushButton_start_stop.setEnabled(True)
+            page.pushButton_start_stop.setIcon(page.start_icon if paused else page.pause_icon)
+            page.pushButton_start_stop.setToolTip("Resume syncing" if paused else "Pause syncing")
+            page.pushButton_start_stop.clicked.connect(lambda: self.toggle_pause(profile_name))
+        else:
+            page.pushButton_start_stop.setEnabled(False)
+            page.pushButton_start_stop.setIcon(page.stop_icon)
+            page.pushButton_start_stop.setToolTip("Managed outside OneDriveGUI")
+
+    def update_attached_tray_icon(self):
+        _overall, _running, _total, profile_statuses = self.aggregate_tray_status()
+        upstream_states = {"ERROR": "error", "STOPPED": "stopped", "SYNCING": "syncing", "IDLE": "synced"}
+
+        states = {}
+        lines = []
+        for profile_name in global_config:
+            instance = self.attached_instance(profile_name)
+            if instance is not None:
+                states[profile_name] = tray_state(instance.props, instance.issues)
+                detail = status_text(instance.props, instance.issues)
+            else:
+                status = profile_statuses.get(profile_name, {"state": "STOPPED", "status_msg": "stopped"})
+                states[profile_name] = upstream_states.get(status["state"], "stopped")
+                detail = status["status_msg"]
+            lines.append(f"{profile_name}: {detail}")
+
+        overall = aggregate_tray_state(set(states.values()))
+        if len(lines) == 1:
+            tooltip = f"OneDrive - {lines[0].split(': ', 1)[1]}"
+        else:
+            tooltip = "\n".join([f"OneDrive - {STATE_LABELS.get(overall, overall)}", ""] + lines)
+
+        if self.tray.toolTip() != tooltip or getattr(self, "tray_overall_state", None) != overall:
+            self.tray_overall_state = overall
+            self.tray.setIcon(tray_icon(overall))
+            self.tray.setToolTip(tooltip)
+
+    def refresh_tray_menu(self):
+        """(Re)build the tray menu; D-Bus entries only for attached profiles."""
+        if not getattr(self, "tray_menu", None):
+            return
+
+        entries = []
+        for profile_name in self.attached:
+            instance = self.attached_instance(profile_name)
+            if instance is not None:
+                entries.append(
+                    (profile_name, instance.has_capability("pause"), instance.props.get("State") == "paused", bool(instance.props.get("OnDemand")))
+                )
+        if entries == self.tray_menu_signature:
+            return
+        self.tray_menu_signature = entries
+
+        menu = self.tray_menu
+        for submenu in menu.findChildren(QMenu, options=Qt.FindDirectChildrenOnly):
+            submenu.deleteLater()
+        menu.clear()
+        for profile_name, can_pause, paused, ondemand in entries:
+            target = menu.addMenu(profile_name) if len(global_config) > 1 else menu
+            target.addAction("Open folder").triggered.connect(lambda checked=False, p=profile_name: self.open_attached_sync_dir(p))
+            view_online = target.addAction("View online")
+            view_online.setEnabled(ondemand)
+            view_online.triggered.connect(lambda checked=False, p=profile_name: self.view_attached_online(p))
+            if can_pause:
+                pause = target.addAction("Resume syncing" if paused else "Pause syncing")
+                pause.triggered.connect(lambda checked=False, p=profile_name: self.toggle_pause(p))
+            target.addAction("Sync now").triggered.connect(lambda checked=False, p=profile_name: self.sync_now(p))
+            target.addAction("Status and issues").triggered.connect(lambda checked=False, p=profile_name: self.show_status_window(p))
+        if entries:
+            menu.addSeparator()
+
+        show_action = menu.addAction("Show/Hide")
+        show_action.triggered.connect(lambda: self.hide() if self.isVisible() else self.show())
+        setting_action = menu.addAction("Settings")
+        setting_action.triggered.connect(self.show_settings_window)
+        quit_action = menu.addAction("Quit OneDriveGUI" if entries else "Quit")
+        quit_action.triggered.connect(lambda: self.graceful_shutdown())
+
+    def toggle_pause(self, profile_name):
+        instance = self.attached_instance(profile_name)
+        if instance is None:
+            return
+        if instance.props.get("State") == "paused":
+            self.dbus.resume(instance.bus_name)
+        else:
+            self.dbus.pause(instance.bus_name, 0)
+
+    def sync_now(self, profile_name):
+        instance = self.attached_instance(profile_name)
+        if instance is not None:
+            self.dbus.sync_now(instance.bus_name)
+
+    def open_attached_sync_dir(self, profile_name):
+        instance = self.attached_instance(profile_name)
+        if instance is not None and instance.props.get("SyncDir"):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(instance.props["SyncDir"]))
+
+    def view_attached_online(self, profile_name):
+        instance = self.attached_instance(profile_name)
+        if instance is None or not instance.props.get("SyncDir"):
+            return
+        sync_dir = instance.props["SyncDir"]
+
+        def done(url, error):
+            if url:
+                QDesktopServices.openUrl(QUrl(url))
+            elif self.tray:
+                self.tray.showMessage("OneDriveGUI", f"No web link for {sync_dir}: {error}", QSystemTrayIcon.Warning, 5000)
+
+        self.dbus.run_async(lambda: read_weburl(sync_dir), done)
+
+    def show_status_window(self, profile_name):
+        if not self.dbus:
+            return
+        if profile_name not in self.status_windows:
+            self.status_windows[profile_name] = OnDemandStatusWindow(self.dbus, profile_name, self.attached.get)
+        window = self.status_windows[profile_name]
+        window.show()
+        window.activateWindow()
+        window.raise_()
+
+    def offer_start_service(self, profile_name):
+        """Start the systemd user unit of a Files On-Demand profile instead of spawning a client."""
+        unit = profile_systemd_unit(global_config[profile_name])
+        if not unit:
+            QMessageBox.information(
+                self,
+                "Files On-Demand profile",
+                f"Profile <b>{profile_name}</b> is a Files On-Demand profile. OneDriveGUI does not start its own client for it; "
+                "start it with <tt>onedrive --monitor --on-demand</tt> or a systemd user unit.",
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "Start OneDrive service ?",
+            f"Profile <b>{profile_name}</b> is run by the systemd user service <b>{unit}</b>, which is not running.<br><br>"
+            "Start the service now?",
+            buttons=QMessageBox.Yes | QMessageBox.No,
+            defaultButton=QMessageBox.Yes,
+        )
+        if answer == QMessageBox.Yes:
+            logging.info(f"[{profile_name}] Starting {unit}")
+            from PySide6.QtCore import QProcess
+
+            QProcess.startDetached("systemctl", ["--user", "start", unit])
+            self.profile_status_pages[profile_name].label_onedrive_status.setText(f"Starting {unit} ...")
+
     def show_main_window(self):
         self.show()
 
@@ -1346,6 +1671,7 @@ class ProfileStatusPage(QWidget, Ui_status_page):
         self.quit_icon = QIcon(DIR_PATH + "/resources/images/quit.png")
         self.close_icon = QIcon(DIR_PATH + "/resources/images/close-filled.png")
 
+        self.pause_icon = themed_icon(["media-playback-pause-symbolic", "media-playback-pause"], DIR_PATH + "/resources/images/stop.png")
         self.folder_icon = QIcon(DIR_PATH + "/resources/images/folder.png")
         self.profile_icon = QIcon(DIR_PATH + "/resources/images/account.png")
         self.settings_icon = QIcon(DIR_PATH + "/resources/images/gear.png")
@@ -1401,6 +1727,16 @@ class ProfileStatusPage(QWidget, Ui_status_page):
         self.pushButton_profiles.setIcon(self.profile_icon)
         self.pushButton_profiles.clicked.connect(lambda: profile_settings_window.show())
         self.pushButton_profiles.clicked.connect(lambda: profile_settings_window.start_unsaved_changes_timer())
+
+        # Status and issues window, only for profiles whose client is attached over D-Bus
+        self.pushButton_status = QPushButton(self)
+        self.pushButton_status.setFlat(True)
+        self.pushButton_status.setIconSize(self.pushButton_open_dir.iconSize())
+        self.pushButton_status.setIcon(themed_icon(["dialog-information-symbolic", "dialog-information"], DIR_PATH + "/resources/images/warning.png"))
+        self.pushButton_status.setToolTip("Transfers and issues")
+        self.pushButton_status.clicked.connect(lambda: main_window_instance.show_status_window(self.profile_name))
+        self.horizontalLayout.insertWidget(1, self.pushButton_status)
+        self.pushButton_status.hide()
 
         # Open GUI Settings window
         self.pushButton_gui_settings.setText("")
