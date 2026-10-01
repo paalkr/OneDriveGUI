@@ -35,4 +35,5 @@ EOF
 
 cd "$repo"
 env HOME="$home" ONEDRIVEGUI_TEST_HOME=1 QT_QPA_PLATFORM=offscreen ONEDRIVEGUI_SYSTEMCTL="$repo/tests/fake_systemctl.sh" \
+    ONEDRIVEGUI_JOURNALCTL="$repo/tests/fake_journalctl.sh" \
     dbus-run-session -- "$python" tests/test_ondemand.py "$@"

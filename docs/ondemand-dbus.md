@@ -127,6 +127,14 @@ the source commit): ignored and refused options are hidden unless "Show all opti
 get a warning icon and the table's note as tooltip, resync-relevant ones are marked "(resync)".
 Without the JSON the editor is unchanged.
 
+**Background service control.** For profiles run by a systemd user unit, "Start background
+service" / "Stop background service" on the Basic page, the profile's main page and the tray
+submenu run `systemctl --user start|stop <unit>` asynchronously and report the unit's new
+ActiveState; a failure shows the last 20 journal lines (`journalctl --user -u <unit> -n 20`).
+Stop asks first (on-demand: the mount goes away and apps with open files may lose unsaved changes;
+normal mode: syncing stops). A stopped unit shows "Stopped (background service)"; after a start
+the client re-attaches over D-Bus. Quitting the GUI never stops a unit.
+
 **Mode indicators** (`src/ondemand_mode.py`): "Files On-Demand", and "Runs as background service
 (systemd)", "Started by OneDriveGUI" or "Started outside OneDriveGUI", plus the unit and its
 ActiveState (cached `systemctl --user show`, refreshed every 5 s). Shown on the profile's main

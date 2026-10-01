@@ -55,7 +55,7 @@ from ondemand_dbus import (
     start_decision,
     tray_state,
 )
-from ondemand_mode import UnitStates, mode_text, profile_mode
+from ondemand_mode import ACTIVE_STATES, UnitStates, mode_text, profile_mode
 from ondemand_ui import STATE_LABELS, OnDemandStatusWindow, file_type_icon, status_text, themed_icon, tray_icon
 from datetime import datetime
 from gui_settings_window import gui_settings_window
@@ -80,6 +80,8 @@ except ImportError:
 class MainWindow(QMainWindow, Ui_MainWindow):
     # Emitted when how a profile runs (on-demand, service/GUI, unit state) or its client state changed.
     mode_indicators_changed = Signal()
+    # profile, "start"/"stop", ok, message, new ActiveState
+    service_action_finished = Signal(str, str, bool, str, str)
 
     def __init__(self):
         # Expose this instance as main_window.main_window_instance so other modules
@@ -1490,9 +1492,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         for profile, text in texts.items():
             page = self.profile_status_pages.get(profile)
             if page is not None:
+                mode = self.profile_mode(profile)
                 # Short form in the header; the unit and its state are in the tooltip.
-                page.label_mode.setText(mode_text(self.profile_mode(profile), include_unit=False))
+                page.label_mode.setText(mode_text(mode, include_unit=False))
                 page.label_mode.setToolTip(text)
+                self.update_service_button(profile, mode)
             index = self.comboBox.findText(profile)
             if index >= 0:
                 self.comboBox.setItemData(index, text, Qt.ToolTipRole)
@@ -1627,24 +1631,114 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.tray.setIcon(tray_icon(overall))
             self.tray.setToolTip(tooltip)
 
+    def update_service_button(self, profile_name, mode):
+        """Start/Stop background service on the profile's main page; the status line when it is stopped."""
+        page = self.profile_status_pages[profile_name]
+        unit = mode["unit"]
+        page.pushButton_service.setVisible(bool(unit))
+        if not unit:
+            return
+        running = mode["active"] in ACTIVE_STATES
+        page.pushButton_service.setText("Stop background service" if running else "Start background service")
+        page.pushButton_service.setToolTip(f"{unit}: {mode['active']}")
+        if profile_name not in self.attached and profile_name not in workers:
+            if mode["active"] in ("inactive", "failed", "deactivating"):
+                page.label_onedrive_status.setText("Stopped (background service)" if mode["active"] != "failed" else f"Background service failed ({unit})")
+            elif mode["active"] in ACTIVE_STATES:
+                page.label_onedrive_status.setText("Starting background service ...")
+
+    def service_unit(self, profile_name):
+        return self.profile_mode(profile_name)["unit"] if profile_name in global_config else ""
+
+    def toggle_service(self, profile_name):
+        if self.profile_mode(profile_name)["active"] in ACTIVE_STATES:
+            self.stop_service(profile_name)
+        else:
+            self.start_service(profile_name)
+
+    def report_service_result(self, profile_name, action, ok, message, active):
+        unit = self.service_unit(profile_name)
+        logging.info(f"[{profile_name}] {action} {unit}: {'ok' if ok else 'failed'}, now {active}")
+        if ok:
+            text = f"{unit} {'started' if action == 'start' else 'stopped'} ({active})."
+            if self.tray:
+                self.tray.showMessage("OneDriveGUI", text, QSystemTrayIcon.Information, 5000)
+        else:
+            QMessageBox.warning(
+                self,
+                f"Could not {action} the background service",
+                f"<b>systemctl --user {action} {unit}</b> failed (state: {active}).<br><br><pre>{message}</pre>",
+            )
+        self.mode_texts = {}
+        self.refresh_mode_indicators()
+        self.service_action_finished.emit(profile_name, action, ok, message, active)
+
+    def start_service(self, profile_name):
+        """systemctl --user start <unit>; the client re-attaches over D-Bus when it is up. No confirmation."""
+        unit = self.service_unit(profile_name)
+        if not unit:
+            return False
+        self.profile_status_pages[profile_name].label_onedrive_status.setText(f"Starting {unit} ...")
+        self.unit_states.start_stop(unit, "start", lambda ok, message, active: self.report_service_result(profile_name, "start", ok, message, active))
+        return True
+
+    def stop_service(self, profile_name):
+        """systemctl --user stop <unit>, after a warning. Quitting the GUI never does this."""
+        unit = self.service_unit(profile_name)
+        if not unit:
+            return False
+        instance = self.attached_instance(profile_name)
+        mount = (instance.props.get("SyncDir") if instance else "") or os.path.expanduser(
+            global_config[profile_name]["onedrive"]["sync_dir"].strip('"')
+        )
+        ondemand = self.profile_mode(profile_name)["ondemand"]
+        if ondemand:
+            warning = (
+                f"Stopping the background service unmounts <b>{mount}</b>. Files in it are unavailable until the "
+                "service is started again, and apps with open files from it may lose unsaved changes. "
+                "Pending uploads continue at the next start."
+            )
+        else:
+            warning = (
+                f"Stopping the background service stops syncing <b>{mount}</b>. The files stay on this computer; "
+                "changes are synced when the service is started again."
+            )
+        answer = QMessageBox.question(
+            self,
+            "Stop background service ?",
+            f"{warning}<br><br>Stop <b>{unit}</b>?",
+            buttons=QMessageBox.Yes | QMessageBox.No,
+            defaultButton=QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return False
+        self.profile_status_pages[profile_name].label_onedrive_status.setText(f"Stopping {unit} ...")
+        self.unit_states.start_stop(unit, "stop", lambda ok, message, active: self.report_service_result(profile_name, "stop", ok, message, active))
+        return True
+
     def refresh_tray_menu(self):
         """(Re)build the tray menu; D-Bus entries only for attached profiles."""
         if not getattr(self, "tray_menu", None):
             return
 
         entries = []
-        for profile_name in self.attached:
+        for profile_name in global_config:
             instance = self.attached_instance(profile_name)
-            if instance is not None:
-                entries.append(
-                    (
-                        profile_name,
-                        instance.has_capability("pause"),
-                        instance.props.get("State") == "paused",
-                        bool(instance.props.get("OnDemand")),
-                        self.profile_mode_text(profile_name, "\n"),
-                    )
+            mode = self.profile_mode(profile_name)
+            if instance is None and not mode["unit"]:
+                continue
+            entries.append(
+                (
+                    profile_name,
+                    instance is not None,
+                    instance is not None and instance.has_capability("pause"),
+                    instance is not None and instance.props.get("State") == "paused",
+                    instance is not None and bool(instance.props.get("OnDemand")),
+                    self.profile_mode_text(profile_name, "\n"),
+                    mode["unit"],
+                    mode["active"] in ACTIVE_STATES,
                 )
+            )
         if entries == self.tray_menu_signature:
             return
         self.tray_menu_signature = entries
@@ -1653,11 +1747,16 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         for submenu in menu.findChildren(QMenu, options=Qt.FindDirectChildrenOnly):
             submenu.deleteLater()
         menu.clear()
-        for profile_name, can_pause, paused, ondemand, mode in entries:
+        for profile_name, attached, can_pause, paused, ondemand, mode, unit, unit_running in entries:
             target = menu.addMenu(profile_name) if len(global_config) > 1 else menu
             for line in mode.splitlines():
                 target.addAction(line).setEnabled(False)
             target.addSeparator()
+            if unit:
+                service = target.addAction("Stop background service" if unit_running else "Start background service")
+                service.triggered.connect(lambda checked=False, p=profile_name: self.toggle_service(p))
+            if not attached:
+                continue
             target.addAction("Open folder").triggered.connect(lambda checked=False, p=profile_name: self.open_attached_sync_dir(p))
             view_online = target.addAction("View online")
             view_online.setEnabled(ondemand)
@@ -1746,11 +1845,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             defaultButton=QMessageBox.Yes,
         )
         if answer == QMessageBox.Yes:
-            logging.info(f"[{profile_name}] Starting {unit}")
-            from PySide6.QtCore import QProcess
-
-            QProcess.startDetached("systemctl", ["--user", "start", unit])
-            self.profile_status_pages[profile_name].label_onedrive_status.setText(f"Starting {unit} ...")
+            self.start_service(profile_name)
 
     def show_main_window(self):
         self.show()
@@ -1860,6 +1955,14 @@ class ProfileStatusPage(QWidget, Ui_status_page):
         self.label_mode.setAlignment(Qt.AlignCenter)
         self.label_mode.setWordWrap(True)
         self.verticalLayout_2.insertWidget(self.verticalLayout_2.indexOf(self.label_account_type) + 1, self.label_mode)
+
+        # Start/Stop of the profile's systemd user unit (shown only for profiles run by one)
+        self.pushButton_service = QPushButton(self.frame)
+        self.pushButton_service.setFlat(True)
+        self.pushButton_service.setStyleSheet("color: rgb(255, 255, 255); text-decoration: underline;")
+        self.pushButton_service.clicked.connect(lambda: main_window_instance.toggle_service(self.profile_name))
+        self.verticalLayout_2.insertWidget(self.verticalLayout_2.indexOf(self.label_mode) + 1, self.pushButton_service, 0, Qt.AlignCenter)
+        self.pushButton_service.hide()
 
         # Allow hyperlinks in status messages
         self.label_onedrive_status.setOpenExternalLinks(True)

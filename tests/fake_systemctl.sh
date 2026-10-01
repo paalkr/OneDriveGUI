@@ -11,6 +11,10 @@ state="inactive disabled"
 [ -f "$HOME/systemd/$unit" ] && state=$(cat "$HOME/systemd/$unit")
 case $cmd in
   show) echo "ActiveState=${state% *}"; echo "UnitFileState=${state#* }" ;;
+  start|stop)
+    if [ -f "$HOME/systemd/$unit.fail" ]; then echo "Job for $unit failed."; exit 1; fi
+    [ "$cmd" = start ] && new=active || new=inactive
+    echo "$new ${state#* }" > "$HOME/systemd/$unit" ;;
   enable) echo "${state% *} enabled" > "$HOME/systemd/$unit"; echo "Created symlink for $unit" ;;
   disable) echo "${state% *} disabled" > "$HOME/systemd/$unit"; echo "Removed symlink for $unit" ;;
   *) exit 1 ;;

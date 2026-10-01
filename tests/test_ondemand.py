@@ -321,6 +321,7 @@ class MainWindowTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.window.dbus.stop()
+        cls.window.refresh_process_status.stop()  # no updates from a finished test window
         stop_mock(cls.mock)
 
     def test_attaches_to_running_client(self):
@@ -371,7 +372,8 @@ class MainWindowTests(unittest.TestCase):
         items = [a.text() for a in submenu.actions() if not a.isSeparator()]
         info = [a.text() for a in submenu.actions() if not a.isSeparator() and not a.isEnabled()]
         self.assertEqual(info[0], "Files On-Demand")
-        self.assertEqual(items[len(info):], ["Open folder", "View online", "Pause syncing", "Sync now", "Status and issues"])
+        self.assertIn(items[len(info)], ("Start background service", "Stop background service"))
+        self.assertEqual(items[len(info) + 1 :], ["Open folder", "View online", "Pause syncing", "Sync now", "Status and issues"])
         self.assertIn("Quit OneDriveGUI", menus)
 
     def test_status_window_issues(self):
@@ -741,12 +743,15 @@ class SettingsPageTests(unittest.TestCase):
 
         cls.psw = psw
         cls.main_window_module = main_window
-        cls.window = main_window.main_window_instance or main_window.MainWindow()
+        # A fresh window: earlier classes stop their window's D-Bus client when they finish.
+        cls.window = main_window.MainWindow()
         cls.mock = start_mock(CONFDIR_A, "--syncdir", MOUNT_A)
 
     @classmethod
     def tearDownClass(cls):
         stop_mock(cls.mock)
+        cls.window.dbus.stop()
+        cls.window.refresh_process_status.stop()  # no updates from a finished test window
 
     def page(self, profile):
         layout = self.psw.profile_settings_window.stackedLayout
@@ -875,6 +880,139 @@ class SettingsPageTests(unittest.TestCase):
         os.remove(state_file)
 
 
+class ServiceControlTests(unittest.TestCase):
+    """Start/Stop of the profile's systemd user unit, with the fake systemctl and journalctl."""
+
+    UNIT = "onedrive-ondemand@profile-a.service"
+
+    @classmethod
+    def setUpClass(cls):
+        import main_window
+        import profile_settings_window as psw
+
+        cls.psw = psw
+        cls.main_window_module = main_window
+        # A fresh window: earlier classes stop their window's D-Bus client when they finish.
+        cls.window = main_window.MainWindow()
+        cls.window.tray = QSystemTrayIcon()
+        cls.window.tray_menu = QMenu()
+        cls.window.tray_menu_signature = None
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.window.dbus.stop()
+        cls.window.refresh_process_status.stop()  # no updates from a finished test window
+
+    def set_unit_state(self, state):
+        path = os.path.join(HOME, "systemd", self.UNIT)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(state)
+        self.window.unit_states.states.clear()
+
+    def systemctl_log(self):
+        path = os.path.join(HOME, "systemctl.log")
+        if not os.path.exists(path):
+            return ""
+        with open(path) as f:
+            return f.read()
+
+    def results(self):
+        results = []
+        self.window.service_action_finished.connect(lambda *args: results.append(args))
+        return results
+
+    def basic_page(self):
+        layout = self.psw.profile_settings_window.stackedLayout
+        page = next(layout.widget(i) for i in range(layout.count()) if getattr(layout.widget(i), "profile", None) == "profile-a")
+        page.basic_page._connected = False
+        page.basic_page.showEvent(__import__("PySide6.QtGui", fromlist=["QShowEvent"]).QShowEvent())
+        return page.basic_page
+
+    def test_stop_asks_with_warning_then_stops_and_shows_stopped(self):
+        from unittest import mock
+
+        self.set_unit_state("active enabled")
+        mock_client = start_mock(CONFDIR_A, "--syncdir", MOUNT_A)
+        try:
+            self.assertTrue(wait_until(lambda: "profile-a" in self.window.attached))
+            page = self.window.profile_status_pages["profile-a"]
+            self.assertTrue(wait_until(lambda: self.window.onedrive_process_status() or page.pushButton_service.text() == "Stop background service"))
+            self.assertFalse(page.pushButton_service.isHidden())
+
+            before = self.systemctl_log()
+            with mock.patch.object(self.main_window_module.QMessageBox, "question", return_value=self.main_window_module.QMessageBox.No) as question:
+                page.pushButton_service.click()
+            warning = question.call_args[0][2]
+            self.assertIn(f"unmounts <b>{MOUNT_A}</b>", warning)
+            self.assertIn("lose unsaved changes", warning)
+            self.assertIn("Pending uploads continue at the next start", warning)
+            self.assertEqual(self.systemctl_log().count("--user stop"), before.count("--user stop"))
+
+            results = self.results()
+            with mock.patch.object(self.main_window_module.QMessageBox, "question", return_value=self.main_window_module.QMessageBox.Yes):
+                page.pushButton_service.click()
+            self.assertTrue(wait_until(lambda: results))
+            self.assertEqual(results[0][:3], ("profile-a", "stop", True))
+            self.assertEqual(results[0][4], "inactive")
+            self.assertIn(f"--user stop {self.UNIT}", self.systemctl_log())
+        finally:
+            stop_mock(mock_client)  # the real unit's client would leave the bus now
+        self.assertTrue(wait_until(lambda: "profile-a" not in self.window.attached))
+        self.assertTrue(wait_until(lambda: self.window.onedrive_process_status() or page.label_onedrive_status.text() == "Stopped (background service)"))
+        self.assertEqual(page.pushButton_service.text(), "Start background service")
+        self.assertIn("Stopped (background service)", self.window.tray.toolTip())
+        menus = [m for m in self.window.tray_menu.findChildren(QMenu) if m.title() == "profile-a" and m.menuAction() in self.window.tray_menu.actions()]
+        self.assertIn("Start background service", [a.text() for a in menus[0].actions()])
+
+    def test_start_from_basic_page_reattaches(self):
+        self.set_unit_state("inactive enabled")
+        basic = self.basic_page()
+        self.assertTrue(wait_until(lambda: basic.refresh() or basic.pushButton_service_start.isEnabled()))
+        self.assertFalse(basic.pushButton_service_stop.isEnabled())
+        results = self.results()
+        basic.pushButton_service_start.click()  # no confirmation
+        self.assertTrue(wait_until(lambda: results))
+        self.assertEqual(results[0][:3], ("profile-a", "start", True))
+        self.assertIn(f"{self.UNIT} started: active", basic.label_service.text())
+        mock_client = start_mock(CONFDIR_A, "--syncdir", MOUNT_A)  # what the unit would start
+        try:
+            self.assertTrue(wait_until(lambda: "profile-a" in self.window.attached))
+            self.assertTrue(wait_until(lambda: basic.refresh() or basic.pushButton_service_stop.isEnabled()))
+        finally:
+            stop_mock(mock_client)
+
+    def test_failed_start_shows_journal(self):
+        from unittest import mock
+
+        self.set_unit_state("failed enabled")
+        open(os.path.join(HOME, "systemd", self.UNIT + ".fail"), "w").close()
+        try:
+            results = self.results()
+            with mock.patch.object(self.main_window_module.QMessageBox, "warning") as warning:
+                self.window.start_service("profile-a")
+                self.assertTrue(wait_until(lambda: results))
+            self.assertFalse(results[0][2])
+            self.assertIn("fake failure for the test", results[0][3])
+            self.assertIn("fake failure for the test", warning.call_args[0][2])
+            with open(os.path.join(HOME, "journalctl.log")) as f:
+                self.assertIn(f"--user -u {self.UNIT} -n 20 --no-pager", f.read())
+        finally:
+            os.remove(os.path.join(HOME, "systemd", self.UNIT + ".fail"))
+
+    def test_stop_warning_for_normal_mode_unit(self):
+        from unittest import mock
+
+        mode = {"ondemand": False, "run": "x", "unit": "onedrive.service", "active": "active", "enabled": "enabled"}
+        with mock.patch.object(self.window, "profile_mode", return_value=mode), mock.patch.object(
+            self.main_window_module.QMessageBox, "question", return_value=self.main_window_module.QMessageBox.No
+        ) as question:
+            self.assertFalse(self.window.stop_service("profile-b"))
+        text = question.call_args[0][2]
+        self.assertNotIn("unmount", text)
+        self.assertIn("stops syncing", text)
+
+
 class QuitBehaviourTests(unittest.TestCase):
     """Runs last: it quits the application's event loop."""
 
@@ -912,6 +1050,8 @@ class QuitBehaviourTests(unittest.TestCase):
 
         from PySide6.QtCore import QTimer
 
+        log = os.path.join(HOME, "systemctl.log")
+        stops_before = open(log).read().count("--user stop") if os.path.exists(log) else 0
         QTimer.singleShot(50, open_status)
         QTimer.singleShot(150, close_status)
         QTimer.singleShot(400, check_running_then_quit)
@@ -921,6 +1061,8 @@ class QuitBehaviourTests(unittest.TestCase):
         self.assertEqual(events, [("shown", True), ("running after close", True)])
         self.assertEqual(result, 0)
         self.assertTrue(quit_seen)
+        # Quitting the GUI never stops a background service.
+        self.assertEqual(open(log).read().count("--user stop") if os.path.exists(log) else 0, stops_before)
         # The status window has the main window as parent: no taskbar entry of its own.
         self.assertIs(window.status_windows["profile-a"].parentWidget(), window)
         app.setQuitOnLastWindowClosed(True)

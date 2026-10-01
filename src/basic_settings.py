@@ -41,6 +41,8 @@ class BasicSettingsPage(QWidget):
         self._syncing_text = False
         self.freeing = False
         self.free_space_result = ""
+        self.service_busy = False
+        self.service_result = ""
 
         self.label_account = QLabel()
         self.label_account.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -71,6 +73,17 @@ class BasicSettingsPage(QWidget):
         self.pushButton_pause = QPushButton()
         self.pushButton_pause.clicked.connect(self.toggle_pause)
 
+        self.pushButton_service_start = QPushButton("Start background service")
+        self.pushButton_service_start.clicked.connect(lambda: self.service_action("start"))
+        self.pushButton_service_stop = QPushButton("Stop background service")
+        self.pushButton_service_stop.clicked.connect(lambda: self.service_action("stop"))
+        service_row = QHBoxLayout()
+        service_row.addWidget(self.pushButton_service_start)
+        service_row.addWidget(self.pushButton_service_stop)
+        self.label_service = QLabel()
+        self.label_service.setWordWrap(True)
+        self.label_service.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
         self.textEdit_folders = QPlainTextEdit()
         self.textEdit_folders.setPlaceholderText("Empty: all of OneDrive. One folder per line, e.g. /Documents")
         self.textEdit_folders.setMaximumHeight(140)
@@ -92,6 +105,9 @@ class BasicSettingsPage(QWidget):
         form.addRow("Files On-Demand", self.label_ondemand)
         form.addRow("Start at login", self.checkBox_start_at_login)
         form.addRow("", self.label_start_at_login)
+        self.label_service_row = QLabel("Background service")
+        form.addRow(self.label_service_row, service_row)
+        form.addRow("", self.label_service)
         form.addRow("Syncing", self.pushButton_pause)
         form.addRow("Folders to show", self.textEdit_folders)
         form.addRow("", self.label_folders_note)
@@ -137,6 +153,7 @@ class BasicSettingsPage(QWidget):
         if window and not getattr(self, "_connected", False):
             self._connected = True
             window.mode_indicators_changed.connect(self.refresh)
+            window.service_action_finished.connect(self.service_action_finished)
 
     def refresh(self):
         config = self.settings_page.temp_profile_config
@@ -169,6 +186,16 @@ class BasicSettingsPage(QWidget):
             self.checkBox_start_at_login.setChecked(self.settings_page.checkBox_auto_sync.isChecked())
             self.checkBox_start_at_login.setEnabled(True)
             self.label_start_at_login.setText("Saved with the other settings.")
+
+        has_unit = bool(mode["unit"])
+        running = mode["active"] in ("active", "activating", "reloading")
+        for widget in (self.label_service_row, self.pushButton_service_start, self.pushButton_service_stop, self.label_service):
+            widget.setVisible(has_unit)
+        if has_unit:
+            self.pushButton_service_start.setEnabled(not running and not self.service_busy)
+            self.pushButton_service_stop.setEnabled(running and not self.service_busy)
+            if not self.service_result:
+                self.label_service.setText(f"{mode['unit']}: {mode['active']}")
 
         can_pause = instance is not None and instance.has_capability("pause")
         self.pushButton_pause.setVisible(can_pause)
@@ -221,6 +248,31 @@ class BasicSettingsPage(QWidget):
                 self.checkBox_start_at_login.setChecked(not checked)
 
         window.unit_states.set_enabled(mode["unit"], checked, done)
+
+    # Background service (systemd user unit)
+
+    def service_action(self, action):
+        window = main_window()
+        if window is None:
+            return
+        # False when there is no unit or the stop was not confirmed
+        started = (window.start_service if action == "start" else window.stop_service)(self.profile)
+        if started:
+            self.service_busy = True
+            self.service_result = ""
+        self.refresh()
+
+    def service_action_finished(self, profile, action, ok, message, active):
+        if profile != self.profile:
+            return
+        self.service_busy = False
+        unit = self.mode()["unit"]
+        if ok:
+            self.service_result = f"{unit} {'started' if action == 'start' else 'stopped'}: {active}"
+        else:
+            self.service_result = f"{action.capitalize()} failed ({active}):\n{message}"
+        self.label_service.setText(self.service_result)
+        self.refresh()
 
     # Pause
 

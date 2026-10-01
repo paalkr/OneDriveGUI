@@ -13,6 +13,8 @@ from ondemand_dbus import is_ondemand_profile, profile_systemd_unit
 
 # Overridable so tests never talk to the user's systemd manager.
 SYSTEMCTL_ENV = "ONEDRIVEGUI_SYSTEMCTL"
+JOURNALCTL_ENV = "ONEDRIVEGUI_JOURNALCTL"
+ACTIVE_STATES = ("active", "activating", "reloading")
 UNIT_STATE_MAX_AGE = 5  # seconds
 
 RUN_SERVICE = "Runs as background service (systemd)"
@@ -23,6 +25,10 @@ ONDEMAND_BADGE = "Files On-Demand"
 
 def systemctl():
     return os.environ.get(SYSTEMCTL_ENV, "systemctl")
+
+
+def journalctl():
+    return os.environ.get(JOURNALCTL_ENV, "journalctl")
 
 
 def parse_unit_show(output):
@@ -43,6 +49,7 @@ class UnitStates(QObject):
         super().__init__(parent)
         self.states = {}  # unit -> (active, enabled, timestamp)
         self.running = {}  # unit -> QProcess
+        self.pending = set()
 
     def state(self, unit):
         """Last known (active, enabled); starts a refresh when the value is old."""
@@ -51,24 +58,74 @@ class UnitStates(QObject):
             self.refresh(unit)
         return (cached[0], cached[1]) if cached else ("unknown", "unknown")
 
-    def refresh(self, unit):
-        if not unit or unit in self.running:
+    def refresh(self, unit, force=False):
+        """Query the unit. force: after a start/stop/enable, a query already running may be stale."""
+        if not unit:
+            return
+        if unit in self.running:
+            if force:
+                self.pending.add(unit)
             return
         process = QProcess(self)
         self.running[unit] = process
 
         def finished(_exit_code, _status):
             output = bytes(process.readAllStandardOutput()).decode(errors="replace")
+            self.running.pop(unit, None)
+            process.deleteLater()
+            if unit in self.pending:
+                self.pending.discard(unit)
+                self.refresh(unit)
+                return
             active, enabled = parse_unit_show(output)
             previous = self.states.get(unit)
             self.states[unit] = (active, enabled, time.time())
-            self.running.pop(unit, None)
-            process.deleteLater()
             if previous is None or previous[:2] != (active, enabled):
                 self.changed.emit(unit)
 
         process.finished.connect(finished)
         process.start(systemctl(), ["--user", "show", unit, "--property=ActiveState,UnitFileState"])
+
+    def start_stop(self, unit, action, callback=None):
+        """
+        `systemctl --user start|stop <unit>`. callback(ok, message, active_state) runs once the new
+        state is known; on failure the message holds the unit's last journal lines.
+        """
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+
+        def report(ok, message):
+            def state_known(changed_unit):
+                if changed_unit != unit:
+                    return
+                self.changed.disconnect(state_known)
+                if callback:
+                    callback(ok, message, self.states[unit][0])
+
+            self.changed.connect(state_known)
+            self.states.pop(unit, None)  # the next refresh always reports
+            self.refresh(unit, force=True)
+
+        def finished(exit_code, _status):
+            output = bytes(process.readAll()).decode(errors="replace").strip()
+            process.deleteLater()
+            logging.info(f"[GUI] systemctl --user {action} {unit}: {exit_code} {output}")
+            if exit_code == 0:
+                report(True, output)
+                return
+            journal = QProcess(self)
+            journal.setProcessChannelMode(QProcess.MergedChannels)
+
+            def journal_finished(_code, _status):
+                lines = bytes(journal.readAll()).decode(errors="replace").strip()
+                journal.deleteLater()
+                report(False, f"{output}\n\n{lines}".strip())
+
+            journal.finished.connect(journal_finished)
+            journal.start(journalctl(), ["--user", "-u", unit, "-n", "20", "--no-pager"])
+
+        process.finished.connect(finished)
+        process.start(systemctl(), ["--user", action, unit])
 
     def set_enabled(self, unit, enabled, callback=None):
         """`systemctl --user enable|disable <unit>` (start at login); callback(ok, output)."""
@@ -79,7 +136,7 @@ class UnitStates(QObject):
             output = bytes(process.readAll()).decode(errors="replace").strip()
             logging.info(f"[GUI] systemctl --user {'enable' if enabled else 'disable'} {unit}: {exit_code} {output}")
             self.states.pop(unit, None)
-            self.refresh(unit)
+            self.refresh(unit, force=True)
             process.deleteLater()
             if callback:
                 callback(exit_code == 0, output)
@@ -99,7 +156,7 @@ def profile_mode(profile_config, instance=None, gui_owns_worker=False, unit_stat
 
     if gui_owns_worker:
         run = RUN_GUI
-    elif unit and (active in ("active", "activating", "reloading") or (instance is None and is_ondemand_profile(profile_config))):
+    elif unit and (active in ACTIVE_STATES or (instance is None and is_ondemand_profile(profile_config))):
         run = RUN_SERVICE
     elif instance is not None:
         run = RUN_OUTSIDE
