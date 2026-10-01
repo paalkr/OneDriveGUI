@@ -1747,7 +1747,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             if ok:
                 logging.info(f"[{profile_name}] Rebuild with {unit} finished")
                 self.unit_states.refresh(service, force=True)
-                text = f"The local index of {profile_name} has been rebuilt; {service} runs again."
+                text = f"The local index of {profile_name} has been rebuilt; {service} is starting again."
                 if self.tray:
                     self.tray.showMessage("OneDriveGUI", text, QSystemTrayIcon.Information, 8000)
                 page.label_onedrive_status.setText("Rebuild finished")
@@ -1757,9 +1757,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 QMessageBox.warning(
                     self,
                     "Rebuilding the local index failed",
-                    f"The rebuild of <b>{profile_name}</b> ({unit}) failed. The background service <b>{service}</b> "
-                    "stays stopped, because it would refuse to sync until a rebuild has succeeded. "
-                    "Fix the cause below, then save again or start the rebuild from a terminal with "
+                    f"The rebuild of <b>{profile_name}</b> ({unit}) failed, so the background service <b>{service}</b> "
+                    "was not started again and stays stopped. "
+                    "When the cause below is fixed, start it with <i>Start background service</i>: on its first start "
+                    "it rebuilds the index itself and keeps your <i>Always keep on this device</i> choices. "
+                    "The rebuild can also be run from a terminal with "
                     f"<tt>onedrive-ondemand-resync {os.path.basename(profile_confdir(global_config[profile_name]))}</tt>."
                     f"<br><br><pre>{message}</pre>",
                 )
