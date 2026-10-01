@@ -708,6 +708,29 @@ class OptionsTableTests(unittest.TestCase):
         self.assertEqual(load_options_table(os.path.join(repo, "missing.json")), {})
 
 
+class ShippedOptionsTableTests(unittest.TestCase):
+    def test_generated_table_is_complete_and_applied(self):
+        from ondemand_options import CLASSES, OPTIONS_JSON, load_options_table
+
+        with open(OPTIONS_JSON) as f:
+            data = __import__("json").load(f)
+        self.assertRegex(data["source_commit"], r"^[0-9a-f]{40}")
+        table = load_options_table()
+        self.assertGreaterEqual(len(table), 90)
+        self.assertTrue(all(info["class"] in CLASSES for info in table.values()))
+        self.assertEqual(table["upload_only"]["class"], "refused")
+        self.assertEqual(table["sync_dir"]["class"], "relevant-ondemand")
+
+        import main_window  # noqa: F401
+        import profile_settings_window as psw
+
+        page = psw.ProfileSettingsPage("profile-a")  # on-demand profile: real table applies
+        self.assertTrue(page.checkBox_upload_only.isHidden())
+        self.assertFalse(page.lineEdit_sync_dir.isHidden())
+        self.assertFalse(page.checkBox_use_recycle_bin.icon().isNull())  # risky
+        self.assertTrue(page.checkBox_skip_dotfiles.text().endswith("(resync)"))
+
+
 class SettingsPageTests(unittest.TestCase):
     """Basic page, Advanced annotations and mode indicators, on profiles in the temp HOME."""
 

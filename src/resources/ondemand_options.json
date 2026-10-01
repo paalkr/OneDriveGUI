@@ -1,0 +1,491 @@
+{
+  "source": "ondemand/OPTIONS.md",
+  "source_commit": "90fe5b4a76d74e1e301dad5c31353bfb1a029496",
+  "options": {
+    "application_id": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Authentication only."
+    },
+    "azure_ad_endpoint": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "National cloud endpoints."
+    },
+    "azure_tenant_id": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Authentication."
+    },
+    "bypass_data_preservation": {
+      "class": "risky",
+      "resync": false,
+      "notes": "No safeBackup conflict copies."
+    },
+    "check_nomount": {
+      "class": "ignored",
+      "resync": false,
+      "notes": "Checks for .nosync in the working directory, which is the backing dir under the confdir."
+    },
+    "check_nosync": {
+      "class": "relevant",
+      "resync": true,
+      "notes": ".nosync in a folder of the backing dir (created through the mount) protects it as in normal mode."
+    },
+    "classify_as_big_delete": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Applies in uploadDeletedItem (sync.d:12768)."
+    },
+    "cleanup_local_files": {
+      "class": "ignored",
+      "resync": false,
+      "notes": "Only valid with download_only (refused)."
+    },
+    "connect_timeout": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "HTTP, connectivity probe, thumbnails."
+    },
+    "create_new_file_version": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "SharePoint enrichment handling."
+    },
+    "data_timeout": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "HTTP, thumbnails."
+    },
+    "dbus_status": {
+      "class": "relevant-ondemand",
+      "resync": false,
+      "notes": "D-Bus status interface, both modes."
+    },
+    "debug_https": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Diagnostics."
+    },
+    "delay_inotify_processing": {
+      "class": "ignored",
+      "resync": false,
+      "notes": "Only applies while the inotify monitor is initialised (main.d:1814 filesystemMonitor.initialised), which it is not in on-demand mode."
+    },
+    "disable_download_validation": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Honoured by engine downloads and hydrations (hydration.d verifyDownload)."
+    },
+    "disable_notifications": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Desktop notifications."
+    },
+    "disable_permission_set": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Backing dir permissions (engine and hydration)."
+    },
+    "disable_time_check": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "System time validation."
+    },
+    "disable_upload_hash_streaming": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Uploads."
+    },
+    "disable_upload_validation": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Uploads."
+    },
+    "disable_version_check": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Version check."
+    },
+    "disable_websocket_support": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Remote change notification."
+    },
+    "display_manager_integration": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Bookmarks use sync_dir, which is the mountpoint the user sees."
+    },
+    "display_memory": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Diagnostics."
+    },
+    "display_processing_time": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Diagnostics."
+    },
+    "display_running_config": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Display."
+    },
+    "display_sync_options": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Diagnostics."
+    },
+    "display_transfer_metrics": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Engine transfers (not hydrations)."
+    },
+    "dns_timeout": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "HTTP, connectivity probe."
+    },
+    "download_only": {
+      "class": "refused",
+      "resync": false,
+      "notes": "See upload_only."
+    },
+    "drive_id": {
+      "class": "relevant",
+      "resync": true,
+      "notes": "SharePoint library selection."
+    },
+    "dry_run": {
+      "class": "risky",
+      "resync": false,
+      "notes": "Uses a copy of the database and fakes engine transfers."
+    },
+    "enable_logging": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Logging."
+    },
+    "file_fragment_size": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Session uploads."
+    },
+    "force_children_scan": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Online scan method."
+    },
+    "force_http_11": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "HTTP."
+    },
+    "force_session_upload": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Uploads."
+    },
+    "force_xfer_abort": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Engine transfers on exit."
+    },
+    "inotify_delay": {
+      "class": "ignored",
+      "resync": false,
+      "notes": "See delay_inotify_processing."
+    },
+    "ip_protocol_version": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "HTTP."
+    },
+    "local_first": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Local-first ordering of the standard sync (main.d:2125)."
+    },
+    "log_dir": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Logging only."
+    },
+    "max_curl_idle": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "CurlEngine pool."
+    },
+    "mirror_local_state": {
+      "class": "risky",
+      "resync": false,
+      "notes": "With local_first: online items queued for download are deleted online instead (sync.d:3445-3457), and new online folders are deleted online (sync.d:3918-3922)."
+    },
+    "monitor_authoritative_sync": {
+      "class": "ignored",
+      "resync": false,
+      "notes": "Only consulted with download_only + cleanup_local_files, which on-demand refuses."
+    },
+    "monitor_fullscan_frequency": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Online full-scan true-up."
+    },
+    "monitor_interval": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Sync cycle interval."
+    },
+    "monitor_log_frequency": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Log suppression."
+    },
+    "monitor_max_loop": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Developer option."
+    },
+    "no_remote_delete": {
+      "class": "ignored",
+      "resync": false,
+      "notes": "Only valid with upload_only, which on-demand refuses (config.d \"--no-remote-delete can only be used with --upload-only\")."
+    },
+    "notify_file_actions": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Notifications."
+    },
+    "notify_monitor_start": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Notification (status text shows \"on-demand mount\")."
+    },
+    "on_demand": {
+      "class": "relevant-ondemand",
+      "resync": false,
+      "notes": "Requires --monitor."
+    },
+    "on_demand_backing_dir": {
+      "class": "relevant-ondemand",
+      "resync": false,
+      "notes": "Backing dir."
+    },
+    "on_demand_cli_download": {
+      "class": "refused",
+      "resync": false,
+      "notes": "CLI only."
+    },
+    "on_demand_cli_free": {
+      "class": "refused",
+      "resync": false,
+      "notes": "CLI only."
+    },
+    "on_demand_cli_pin": {
+      "class": "refused",
+      "resync": false,
+      "notes": "CLI only."
+    },
+    "on_demand_cli_status": {
+      "class": "refused",
+      "resync": false,
+      "notes": "CLI only."
+    },
+    "on_demand_cli_unpin": {
+      "class": "refused",
+      "resync": false,
+      "notes": "CLI only."
+    },
+    "on_demand_thumbnails": {
+      "class": "relevant-ondemand",
+      "resync": false,
+      "notes": "Thumbnails for online-only files."
+    },
+    "operation_timeout": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "HTTP."
+    },
+    "permanent_delete": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Local deletes through the mount (including of online-only files) are permanent online, as in normal mode."
+    },
+    "rate_limit": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Applies to engine transfers and hydrations (same CurlEngine)."
+    },
+    "read_only_auth_scope": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Uploads fail; local edits through the mount stay local."
+    },
+    "recycle_bin_path": {
+      "class": "risky",
+      "resync": false,
+      "notes": "See use_recycle_bin."
+    },
+    "remove_source_files": {
+      "class": "ignored",
+      "resync": false,
+      "notes": "Only valid with upload_only (refused)."
+    },
+    "remove_source_folders": {
+      "class": "ignored",
+      "resync": false,
+      "notes": "Only valid with upload_only (refused)."
+    },
+    "resync": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Rebuilds the database."
+    },
+    "resync_auth": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Authentication."
+    },
+    "skip_dir": {
+      "class": "relevant",
+      "resync": true,
+      "notes": "Client-side filtering."
+    },
+    "skip_dir_strict_match": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Filtering."
+    },
+    "skip_dotfiles": {
+      "class": "relevant",
+      "resync": true,
+      "notes": "Filtering."
+    },
+    "skip_file": {
+      "class": "relevant",
+      "resync": true,
+      "notes": "As skip_dir, for files."
+    },
+    "skip_size": {
+      "class": "relevant",
+      "resync": true,
+      "notes": "Filtering."
+    },
+    "skip_symlinks": {
+      "class": "ignored",
+      "resync": true,
+      "notes": "Symlinks cannot be created through the mount (no symlink operation)."
+    },
+    "space_reservation": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Download and hydration free-space check."
+    },
+    "sync_business_shared_items": {
+      "class": "risky",
+      "resync": true,
+      "notes": "Shared (remote) items are out of scope for on-demand."
+    },
+    "sync_dir": {
+      "class": "relevant-ondemand",
+      "resync": true,
+      "notes": "It is the mountpoint."
+    },
+    "sync_dir_permissions": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Applied to backing-dir folders created by the engine."
+    },
+    "sync_file_permissions": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Applied to downloaded/hydrated backing files and visible through the mount (lstat)."
+    },
+    "sync_root_files": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "sync_list."
+    },
+    "threads": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Engine transfer pool."
+    },
+    "transfer_order": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Order of engine download/upload batches."
+    },
+    "upload_only": {
+      "class": "refused",
+      "resync": false,
+      "notes": "\"--on-demand cannot be used with --upload-only or --download-only\"."
+    },
+    "use_device_auth": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Authentication."
+    },
+    "use_intune_sso": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Authentication."
+    },
+    "use_recycle_bin": {
+      "class": "risky",
+      "resync": false,
+      "notes": "Online deletions move backing-dir files to the recycle bin (online-only files have no local file, so nothing moves)."
+    },
+    "user_agent": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "HTTP."
+    },
+    "verbose": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Logging."
+    },
+    "webhook_enabled": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Remote change notification."
+    },
+    "webhook_expiration_interval": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Webhook."
+    },
+    "webhook_listening_host": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Webhook."
+    },
+    "webhook_listening_port": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Webhook."
+    },
+    "webhook_public_url": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Webhook."
+    },
+    "webhook_renewal_interval": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Webhook."
+    },
+    "webhook_retry_interval": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Webhook."
+    },
+    "write_xattr_data": {
+      "class": "relevant",
+      "resync": false,
+      "notes": "Writes user.onedrive.createdBy / user.onedrive.lastModifiedBy on backing files after download (sync.d:5388-5389)."
+    }
+  }
+}
