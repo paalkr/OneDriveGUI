@@ -652,5 +652,92 @@ class ConfigGuardTests(unittest.TestCase):
             self.main_window_globals().pop("guard-page", None)
 
 
+class QuitBehaviourTests(unittest.TestCase):
+    """Runs last: it quits the application's event loop."""
+
+    def test_closing_status_window_with_hidden_main_window_keeps_running(self):
+        from unittest import mock
+
+        import main_window
+
+        window = main_window.MainWindow()
+        window.tray = QSystemTrayIcon()
+        window.tray_menu = QMenu()
+        window.tray_menu_signature = None
+        window.refresh_tray_menu()
+        with mock.patch.object(QSystemTrayIcon, "isSystemTrayAvailable", return_value=True):
+            window.configure_quit_on_last_window_closed(app)
+        self.assertFalse(app.quitOnLastWindowClosed())
+
+        quit_seen = []
+        app.aboutToQuit.connect(lambda: quit_seen.append(time.time()))
+        events = []
+        window.hide()
+
+        def open_status():
+            window.show_status_window("profile-a")
+            events.append(("shown", window.status_windows["profile-a"].isVisible()))
+
+        def close_status():
+            window.status_windows["profile-a"].close()
+
+        def check_running_then_quit():
+            events.append(("running after close", not quit_seen))
+            quit_action = next(a for a in window.tray_menu.actions() if a.text().startswith("Quit"))
+            with mock.patch.object(main_window.QMessageBox, "question", return_value=main_window.QMessageBox.Yes):
+                quit_action.trigger()
+
+        from PySide6.QtCore import QTimer
+
+        QTimer.singleShot(50, open_status)
+        QTimer.singleShot(150, close_status)
+        QTimer.singleShot(400, check_running_then_quit)
+        watchdog = QTimer.singleShot(5000, lambda: events.append(("watchdog", True)) or app.exit(1))
+        result = app.exec()
+
+        self.assertEqual(events, [("shown", True), ("running after close", True)])
+        self.assertEqual(result, 0)
+        self.assertTrue(quit_seen)
+        # The status window has the main window as parent: no taskbar entry of its own.
+        self.assertIs(window.status_windows["profile-a"].parentWidget(), window)
+        app.setQuitOnLastWindowClosed(True)
+
+    def test_single_instance_server(self):
+        from single_instance import InstanceServer, activate_running_instance
+
+        name = os.path.join(HOME, "single-instance-test")
+        self.assertFalse(activate_running_instance(name, timeout_ms=200))
+        server = InstanceServer(name)
+        requests = []
+        server.activate_requested.connect(lambda: requests.append(True))
+        self.assertTrue(activate_running_instance(name))
+        self.assertTrue(wait_until(lambda: requests))
+
+    def test_second_gui_start_raises_first_and_exits_and_sigterm_quits(self):
+        import signal as signals
+
+        gui = os.path.join(SRC_DIR, "OneDriveGUI.py")
+        first = subprocess.Popen([sys.executable, gui], cwd=SRC_DIR, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            log = os.path.join(HOME, "onedrive-gui.log")
+            def log_text():
+                if not os.path.exists(log):
+                    return ""
+                with open(log) as f:
+                    return f.read()
+
+            self.assertTrue(wait_until(lambda: "Starting OneDriveGUI maximized" in log_text(), timeout=30))
+            second = subprocess.run([sys.executable, gui], cwd=SRC_DIR, capture_output=True, text=True, timeout=60)
+            self.assertEqual(second.returncode, 0)
+            self.assertTrue(wait_until(lambda: "asked to show the window" in log_text(), timeout=10))
+            first.send_signal(signals.SIGTERM)
+            self.assertEqual(first.wait(timeout=20), 0)
+        finally:
+            if first.poll() is None:
+                first.kill()
+                first.wait()
+            first.stdout.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

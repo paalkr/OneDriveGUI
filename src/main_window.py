@@ -311,23 +311,40 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         )
 
         if close_question == QMessageBox.Yes:
-            logging.info("Quitting OneDriveGUI")
-            workers_to_stop = []
-
-            # Only workers hold clients the GUI started; attached clients are never stopped.
-            for worker in workers:
-                workers_to_stop.append(worker)
-
-            for worker in workers_to_stop:
-                workers[worker].stop_worker()
-
-            if self.dbus:
-                self.dbus.stop()
-
-            sys.exit()
+            self.shutdown()
 
         elif close_question == QMessageBox.No:
             logging.info("[GUI] Keeping OneDriveGUI running.")
+
+    def shutdown(self):
+        """Stop the clients the GUI started and quit. Attached clients are never stopped."""
+        logging.info("Quitting OneDriveGUI")
+        workers_to_stop = []
+
+        for worker in workers:
+            workers_to_stop.append(worker)
+
+        for worker in workers_to_stop:
+            workers[worker].stop_worker()
+
+        if self.dbus:
+            self.dbus.stop()
+
+        if self.tray:
+            self.tray.hide()
+        # exit(), not quit(): Qt 6's quit() first closes every window and gives up when one refuses,
+        # which the main window does (it hides to the tray instead).
+        QApplication.exit(0)
+
+    def configure_quit_on_last_window_closed(self, app):
+        app.setQuitOnLastWindowClosed(not (self.tray and self.tray.isSystemTrayAvailable()))
+
+    def show_and_raise(self):
+        if self.isMinimized():
+            self.showNormal()
+        self.show()
+        self.activateWindow()
+        self.raise_()
 
     def stop_onedrive_monitor(self, profile_name):
         if profile_name in workers:
@@ -1648,7 +1665,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if not self.dbus:
             return
         if profile_name not in self.status_windows:
-            self.status_windows[profile_name] = OnDemandStatusWindow(self.dbus, profile_name, self.attached.get)
+            # Parented to the main window (no taskbar entry of its own), still a separate window.
+            self.status_windows[profile_name] = OnDemandStatusWindow(self.dbus, profile_name, self.attached.get, parent=self)
+            self.status_windows[profile_name].setWindowFlag(Qt.Window, True)
+            self.status_windows[profile_name].setAttribute(Qt.WA_QuitOnClose, False)
         window = self.status_windows[profile_name]
         window.show()
         window.activateWindow()

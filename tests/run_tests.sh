@@ -15,6 +15,8 @@ trap 'rm -rf "$home"' EXIT
 mkdir -p "$home/.config/onedrive-gui" "$home/.config/profile-a" "$home/.config/profile-b"
 printf 'sync_dir = "%s/OneDrive-a"\n' "$home" > "$home/.config/profile-a/config"
 printf 'sync_dir = "%s/OneDrive-b"\n' "$home" > "$home/.config/profile-b/config"
+# Keep the GUI's own log inside the temporary HOME.
+printf '[SETTINGS]\nlog_file = %s/onedrive-gui.log\ndebug_level = INFO\n' "$home" > "$home/.config/onedrive-gui/gui_settings"
 cat > "$home/.config/onedrive-gui/profiles" <<EOF
 [profile-a]
 config_file = $home/.config/profile-a/config
