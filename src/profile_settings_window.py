@@ -766,8 +766,8 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
             # Files On-Demand: a resync rebuilds the index only; it does not re-download anything.
             text += (
                 "The client rebuilds its local index of your OneDrive. Files already downloaded stay on this "
-                "device and are not downloaded again; online-only files stay online-only. Nothing is uploaded "
-                "or deleted by the rebuild itself."
+                "device and are not downloaded again; online-only files stay online-only. Files you chose to "
+                "always keep on this device stay that way. Nothing is uploaded or deleted by the rebuild itself."
             )
         else:
             text += "A resync rebuilds the local state from OneDrive."

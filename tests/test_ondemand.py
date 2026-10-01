@@ -630,11 +630,12 @@ class ConfigGuardTests(unittest.TestCase):
                 with open(sync_list) as f:
                     self.assertEqual(f.read(), sync_list_before)
 
-                page.temp_profile_config["onedrive"]["sync_dir"] = '"~/Elsewhere"'
+                # skip_size: resync-relevant in on-demand mode too (sync_dir no longer is since d2f488b)
+                page.temp_profile_config["onedrive"]["skip_size"] = '"50"'
                 page.save_clicked()
                 question.assert_called_once()
                 message = question.call_args[0][2]
-                self.assertIn("sync_dir", message)
+                self.assertIn("skip_size", message)
                 self.assertIn("--resync", message)
                 self.assertIn("systemctl --user stop onedrive-ondemand@guard-page.service", message)
                 self.assertIn("--monitor --on-demand --resync --resync-auth", message)
@@ -642,10 +643,10 @@ class ConfigGuardTests(unittest.TestCase):
                 self.assertIn("not downloaded again; online-only files stay online-only", message)
                 self.assertIn("Nothing is uploaded or deleted by the rebuild itself", message)
                 self.assertNotIn("rebuilds the local state", message)
-                self.assertNotIn("pin", message.lower().replace("ctrl", ""))
-                self.assertNotIn("Elsewhere", self.read(profile))  # declined: nothing written
+                self.assertIn("Files you chose to always keep on this device stay that way", message)
+                self.assertNotIn("skip_size", self.read(profile))  # declined: nothing written
 
-                page.temp_profile_config["onedrive"]["sync_dir"] = profile["onedrive"]["sync_dir"]
+                page.temp_profile_config["onedrive"].pop("skip_size")
                 page.textEdit_sync_list.setPlainText(sync_list_before + "/Music\n")
                 question.reset_mock()
                 page.save_clicked()
@@ -798,7 +799,7 @@ class SettingsPageTests(unittest.TestCase):
         self.assertTrue(plain.checkBox_show_all_options.isHidden())
         self.assertFalse(plain.checkBox_skip_dotfiles.text().endswith("(resync)"))
 
-    def test_folder_location_change_asks_for_resync(self):
+    def test_folder_location_change_asks_to_move_the_mount(self):
         from unittest import mock
 
         page = self.page("profile-a")
@@ -808,7 +809,9 @@ class SettingsPageTests(unittest.TestCase):
         self.assertEqual(page.lineEdit_sync_dir.text(), "~/Elsewhere")
         with mock.patch.object(self.psw.QMessageBox, "question", return_value=self.psw.QMessageBox.No) as question:
             page.save_clicked()
-        self.assertIn("sync_dir", question.call_args[0][2])
+        # On-demand: moving the mount needs no resync (OPTIONS.md since d2f488b), only a restart.
+        question.assert_called_once()
+        self.assertIn("is unmounted and the files appear at <b>~/Elsewhere</b> after the service restarts", question.call_args[0][2])
         page.discard_changes()
 
     def test_folder_selection_mirrors_sync_list_editor(self):

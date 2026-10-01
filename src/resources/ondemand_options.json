@@ -1,6 +1,6 @@
 {
   "source": "ondemand/OPTIONS.md",
-  "source_commit": "f9000c328fcd3bf72209e04f78f1a063b3e2430b",
+  "source_commit": "d2f488b6df7713f30c5f1316aa5a9eb43a560861",
   "options": {
     "application_id": {
       "class": "relevant",
@@ -269,8 +269,8 @@
     },
     "on_demand_backing_dir": {
       "class": "relevant-ondemand",
-      "resync": false,
-      "notes": "Backing dir."
+      "resync": true,
+      "notes": "The local folder that holds downloaded files; changing it requires --resync."
     },
     "on_demand_cli_download": {
       "class": "refused",
@@ -389,8 +389,8 @@
     },
     "sync_dir": {
       "class": "relevant-ondemand",
-      "resync": true,
-      "notes": "It is the mountpoint."
+      "resync": false,
+      "notes": "The mountpoint; changing it needs no --resync in on-demand mode (it does in normal mode) as long as on_demand_backing_dir is unchanged."
     },
     "sync_dir_permissions": {
       "class": "relevant",
