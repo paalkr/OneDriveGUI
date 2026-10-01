@@ -1660,7 +1660,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         unit = self.service_unit(profile_name)
         logging.info(f"[{profile_name}] {action} {unit}: {'ok' if ok else 'failed'}, now {active}")
         if ok:
-            text = f"{unit} {'started' if action == 'start' else 'stopped'} ({active})."
+            text = f"{unit} {({'start': 'started', 'stop': 'stopped', 'restart': 'restarted'})[action]} ({active})."
             if self.tray:
                 self.tray.showMessage("OneDriveGUI", text, QSystemTrayIcon.Information, 5000)
         else:

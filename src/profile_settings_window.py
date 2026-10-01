@@ -299,6 +299,10 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
     def configure_basic_and_advanced_tabs(self):
         from basic_settings import BasicSettingsPage
 
+        self.options_hidden_widgets = set()
+        self.options_original_texts = {}
+        self.options_table = load_options_table() if is_ondemand_profile(global_config.get(self.profile, self.temp_profile_config)) else {}
+
         index = self.verticalLayout_13.indexOf(self.tabWidget)
         self.verticalLayout_13.removeWidget(self.tabWidget)
 
@@ -318,9 +322,6 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
         self.tabWidget_basic_advanced.addTab(advanced, "Advanced")
         self.verticalLayout_13.insertWidget(index, self.tabWidget_basic_advanced)
 
-        self.options_hidden_widgets = set()
-        self.options_original_texts = {}
-        self.options_table = load_options_table() if is_ondemand_profile(global_config.get(self.profile, self.temp_profile_config)) else {}
         self.checkBox_show_all_options.setVisible(bool(self.options_table))
         self.apply_options_table()
 
@@ -689,17 +690,63 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
         return self.read_sync_list() != new_text
 
     def save_clicked(self):
-        if is_client_owned(self.profile, global_config[self.profile]) and not self.confirm_resync_relevant_changes():
-            logging.info(f"[{self.profile}] Saving cancelled: resync-relevant change not confirmed")
-            return
+        restart_unit = None
+        if is_client_owned(self.profile, global_config[self.profile]):
+            if not self.confirm_resync_relevant_changes():
+                logging.info(f"[{self.profile}] Saving cancelled: resync-relevant change not confirmed")
+                return
+            confirmed, restart_unit = self.confirm_mount_move()
+            if not confirmed:
+                logging.info(f"[{self.profile}] Saving cancelled: folder move not confirmed")
+                return
         self.save_profile_settings()
         self.save_sync_list()
+        if restart_unit:
+            window = getattr(main_window, "main_window_instance", None)
+            if window is not None:
+                window.unit_states.start_stop(restart_unit, "restart", lambda ok, message, active: window.report_service_result(self.profile, "restart", ok, message, active))
+
+    def is_resync_key(self, key):
+        """
+        Resync-relevant in the client. For Files On-Demand profiles the option table from
+        ondemand/OPTIONS.md decides (e.g. moving the mount needs no resync there).
+        """
+        if key not in RESYNC_RELEVANT_KEYS:
+            return False
+        if self.options_table and key in self.options_table:
+            return bool(self.options_table[key].get("resync"))
+        return True
 
     def resync_relevant_changes(self):
-        changes = [key for key in changed_config_keys(self.temp_profile_config) if key in RESYNC_RELEVANT_KEYS]
+        changes = [key for key in changed_config_keys(self.temp_profile_config) if self.is_resync_key(key)]
         if self.sync_list_changed():
             changes.append("sync_list")
         return changes
+
+    def confirm_mount_move(self):
+        """
+        Files On-Demand profile whose sync_dir (the mountpoint) changes without a resync: say what
+        happens and offer to restart the service. Returns (save?, unit to restart or None).
+        """
+        profile = global_config[self.profile]
+        changed = changed_config_keys(self.temp_profile_config)
+        if not is_ondemand_profile(profile) or "sync_dir" not in changed or self.is_resync_key("sync_dir"):
+            return True, None
+
+        old = profile["onedrive"]["sync_dir"].strip('"')
+        new = changed["sync_dir"].strip('"')
+        unit = profile_systemd_unit(profile)
+        window = getattr(main_window, "main_window_instance", None)
+        running = bool(unit and window and window.profile_mode(self.profile)["active"] in ("active", "activating", "reloading"))
+        text = f"The folder <b>{old}</b> is unmounted and the files appear at <b>{new}</b> after the service restarts."
+        if running:
+            text += f"<br><br>Save and restart <b>{unit}</b> now?"
+        else:
+            text += "<br><br>Save the change? It takes effect when the service is started."
+        answer = QMessageBox.question(self, "Move the OneDrive folder ?", text, buttons=QMessageBox.Yes | QMessageBox.No, defaultButton=QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return False, None
+        return True, unit if running else None
 
     def confirm_resync_relevant_changes(self):
         """
@@ -710,12 +757,20 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
         if not changes:
             return True
 
+        profile = global_config[self.profile]
         text = (
             f"Changing <b>{', '.join(changes)}</b> makes the OneDrive client for profile <b>{self.profile}</b> "
             "stop at its next start until it has been run once with <tt>--resync</tt>. "
-            "A resync rebuilds the local state from OneDrive."
         )
-        profile = global_config[self.profile]
+        if is_ondemand_profile(profile):
+            # Files On-Demand: a resync rebuilds the index only; it does not re-download anything.
+            text += (
+                "The client rebuilds its local index of your OneDrive. Files already downloaded stay on this "
+                "device and are not downloaded again; online-only files stay online-only. Nothing is uploaded "
+                "or deleted by the rebuild itself."
+            )
+        else:
+            text += "A resync rebuilds the local state from OneDrive."
         unit = profile_systemd_unit(profile)
         if is_ondemand_profile(profile) and unit:
             confdir = profile_confdir(profile)
@@ -723,7 +778,7 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
                 "<br><br>After saving, restart the service with a resync:<br>"
                 f"<tt>systemctl --user stop {unit}</tt><br>"
                 f"<tt>onedrive --confdir={confdir} --monitor --on-demand --resync --resync-auth</tt><br>"
-                "(stop it with Ctrl+C once the synchronisation has completed)<br>"
+                "(stop it with Ctrl+C once the rebuild has completed)<br>"
                 f"<tt>systemctl --user start {unit}</tt>"
             )
         text += "<br><br>Save the changes?"

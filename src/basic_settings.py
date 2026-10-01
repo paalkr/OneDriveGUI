@@ -59,7 +59,7 @@ class BasicSettingsPage(QWidget):
         folder_row.addWidget(self.lineEdit_folder)
         folder_row.addWidget(self.pushButton_folder_browse)
         folder_row.addWidget(self.pushButton_folder_open)
-        self.label_folder_note = QLabel("Changing the folder makes the client resynchronise everything (you are asked before saving).")
+        self.label_folder_note = QLabel()
         self.label_folder_note.setWordWrap(True)
 
         self.label_ondemand = QLabel()
@@ -89,7 +89,7 @@ class BasicSettingsPage(QWidget):
         self.textEdit_folders.setMaximumHeight(140)
         self.textEdit_folders.textChanged.connect(self.folders_edited)
         settings_page.textEdit_sync_list.textChanged.connect(self.folders_changed_in_advanced)
-        self.label_folders_note = QLabel("Changing the folder selection makes the client resynchronise (you are asked before saving).")
+        self.label_folders_note = QLabel()
         self.label_folders_note.setWordWrap(True)
 
         self.pushButton_free_space = QPushButton("Free up space for the whole drive")
@@ -164,6 +164,16 @@ class BasicSettingsPage(QWidget):
         account_type = (instance.props.get("AccountType") if instance else "") or config.get("account_type", "")
         self.label_account.setText(f"{account} ({account_type.capitalize()})" if account_type and account_type != "unknown" else account)
         self.label_mode.setText(mode_text(mode, "\n"))
+
+        if mode["ondemand"]:
+            if self.settings_page.is_resync_key("sync_dir"):
+                self.label_folder_note.setText("Changing the folder makes the client rebuild its local index; downloaded files are kept (you are asked before saving).")
+            else:
+                self.label_folder_note.setText("Changing the folder moves where OneDrive appears when the service restarts (you are asked before saving).")
+            self.label_folders_note.setText("Changing the folder selection makes the client rebuild its local index; downloaded files are kept (you are asked before saving).")
+        else:
+            self.label_folder_note.setText("Changing the folder makes the client resynchronise everything (you are asked before saving).")
+            self.label_folders_note.setText("Changing the folder selection makes the client resynchronise (you are asked before saving).")
 
         if not self.lineEdit_folder.hasFocus():
             self.lineEdit_folder.setText(self.settings_page.lineEdit_sync_dir.text())
@@ -268,7 +278,7 @@ class BasicSettingsPage(QWidget):
         self.service_busy = False
         unit = self.mode()["unit"]
         if ok:
-            self.service_result = f"{unit} {'started' if action == 'start' else 'stopped'}: {active}"
+            self.service_result = f"{unit} {({'start': 'started', 'stop': 'stopped', 'restart': 'restarted'})[action]}: {active}"
         else:
             self.service_result = f"{action.capitalize()} failed ({active}):\n{message}"
         self.label_service.setText(self.service_result)

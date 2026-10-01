@@ -638,6 +638,11 @@ class ConfigGuardTests(unittest.TestCase):
                 self.assertIn("--resync", message)
                 self.assertIn("systemctl --user stop onedrive-ondemand@guard-page.service", message)
                 self.assertIn("--monitor --on-demand --resync --resync-auth", message)
+                self.assertIn("rebuilds its local index", message)
+                self.assertIn("not downloaded again; online-only files stay online-only", message)
+                self.assertIn("Nothing is uploaded or deleted by the rebuild itself", message)
+                self.assertNotIn("rebuilds the local state", message)
+                self.assertNotIn("pin", message.lower().replace("ctrl", ""))
                 self.assertNotIn("Elsewhere", self.read(profile))  # declined: nothing written
 
                 page.temp_profile_config["onedrive"]["sync_dir"] = profile["onedrive"]["sync_dir"]
@@ -1014,6 +1019,96 @@ class ServiceControlTests(unittest.TestCase):
         text = question.call_args[0][2]
         self.assertNotIn("unmount", text)
         self.assertIn("stops syncing", text)
+
+
+class ResyncWordingTests(unittest.TestCase):
+    """On-demand vs normal-mode wording, and moving the mount without a resync."""
+
+    @classmethod
+    def setUpClass(cls):
+        import main_window
+        import global_config as gc
+        import profile_settings_window as psw
+
+        cls.gc = gc
+        cls.psw = psw
+        cls.window = main_window.MainWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.window.dbus.stop()
+        cls.window.refresh_process_status.stop()  # no updates from a finished test window
+
+    def page_for(self, name, ondemand):
+        import copy
+        from options import global_config
+
+        helper = ConfigGuardTests()
+        helper.gc = self.gc
+        profile = helper.make_profile(name, ondemand_marker=ondemand)
+        global_config[name] = profile
+        self.psw.temp_global_config[name] = copy.deepcopy(profile)
+        self.addCleanup(global_config.pop, name, None)
+        return self.psw.ProfileSettingsPage(name), profile
+
+    def test_normal_mode_wording_unchanged(self):
+        from unittest import mock
+
+        page, _profile = self.page_for("wording-normal", ondemand=False)
+        self.gc.set_attached_check(lambda name: name == "wording-normal")  # client-owned, not on-demand
+        try:
+            page.temp_profile_config["onedrive"]["skip_dotfiles"] = '"true"'
+            with mock.patch.object(self.psw.QMessageBox, "question", return_value=self.psw.QMessageBox.No) as question:
+                page.save_clicked()
+        finally:
+            self.gc.set_attached_check(self.window.profile_has_dbus_client)
+        message = question.call_args[0][2]
+        self.assertIn("A resync rebuilds the local state from OneDrive.", message)
+        self.assertNotIn("local index", message)
+        self.assertIn("resynchronise everything", page.basic_page.label_folder_note.text())
+
+    def test_mount_move_without_resync_restarts_the_service(self):
+        from unittest import mock
+
+        unit = "onedrive-ondemand@wording-move.service"
+        os.makedirs(os.path.join(HOME, "systemd"), exist_ok=True)
+        with open(os.path.join(HOME, "systemd", unit), "w") as f:
+            f.write("active enabled")
+        page, profile = self.page_for("wording-move", ondemand=True)
+        # As in OPTIONS.md once moving the mount no longer needs a resync.
+        page.options_table = dict(page.options_table)
+        page.options_table["sync_dir"] = dict(page.options_table.get("sync_dir", {"class": "relevant-ondemand", "notes": ""}), resync=False)
+        page.basic_page.refresh()
+        self.assertIn("moves where OneDrive appears", page.basic_page.label_folder_note.text())
+        self.assertTrue(wait_until(lambda: self.window.profile_mode("wording-move")["active"] == "active"), self.window.profile_mode("wording-move"))
+
+        old = profile["onedrive"]["sync_dir"].strip('"')
+        new = os.path.join(HOME, "OneDrive-moved")
+        page.temp_profile_config["onedrive"]["sync_dir"] = f'"{new}"'
+        results = []
+        self.window.service_action_finished.connect(lambda *args: results.append(args))
+        with mock.patch.object(self.psw.QMessageBox, "question", return_value=self.psw.QMessageBox.Yes) as question:
+            page.save_clicked()
+        self.assertEqual(question.call_count, 1)  # no resync dialog, only the move
+        text = question.call_args[0][2]
+        self.assertIn(f"The folder <b>{old}</b> is unmounted and the files appear at <b>{new}</b> after the service restarts", text)
+        self.assertIn(f"restart <b>{unit}</b>", text)
+        with open(profile["config_file"]) as f:
+            self.assertIn(f'sync_dir = "{new}"', f.read())
+        self.assertTrue(wait_until(lambda: results))
+        self.assertEqual(results[0][:3], ("wording-move", "restart", True))
+        with open(os.path.join(HOME, "systemctl.log")) as f:
+            self.assertIn(f"--user restart {unit}", f.read())
+
+    def test_mount_move_still_resync_when_table_says_so(self):
+        from unittest import mock
+
+        page, _profile = self.page_for("wording-resync", ondemand=True)
+        page.options_table = {"sync_dir": {"class": "relevant-ondemand", "resync": True, "notes": ""}}
+        page.temp_profile_config["onedrive"]["sync_dir"] = '"~/Elsewhere"'
+        with mock.patch.object(self.psw.QMessageBox, "question", return_value=self.psw.QMessageBox.No) as question:
+            page.save_clicked()
+        self.assertIn("rebuilds its local index", question.call_args[0][2])
 
 
 class QuitBehaviourTests(unittest.TestCase):
