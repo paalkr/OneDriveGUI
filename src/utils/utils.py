@@ -98,6 +98,25 @@ def get_installed_client_version(client_bin_path: str) -> int:
     return installed_client_version_num
 
 
+def development_build_label(version_output, fork_detected=False):
+    """
+    Label for a client that is not a plain abraunegg release, or None for a release.
+
+    A git-describe suffix ("v2.5.11-160-gd2f488b", optionally "-dirty") means a development build:
+    "Development build v2.5.11 + 160 commits (d2f488b)". A plain version reported by a client that
+    exposes the on-demand fork's D-Bus interface is labelled as that fork's build.
+    """
+    match = re.search(r"(v\d+(?:\.\d+)*)-(\d+)-g([0-9a-f]{4,40})(-dirty)?", version_output or "")
+    if match:
+        base, commits, sha, dirty = match.groups()
+        label = f"Development build {base} + {commits} commit{'s' if commits != '1' else ''} ({sha})"
+        return label + (", modified" if dirty else "")
+    if fork_detected:
+        release = re.search(r"(v\d+(?:\.\d+)*)", version_output or "")
+        return f"Files On-Demand build {release.group(1) if release else ''}".strip()
+    return None
+
+
 def config_client_bin_path() -> str:
     client_bin_path = gui_settings.get("client_bin_path")
     logging.info(f"Onedrive client location: '{client_bin_path}'")

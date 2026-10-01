@@ -179,6 +179,14 @@ class PureLogicTests(unittest.TestCase):
             self.assertIn("[work]", text)
             self.assertIn("ondemand = True", text)
 
+    def test_development_build_label(self):
+        from utils.utils import development_build_label
+
+        self.assertEqual(development_build_label("onedrive v2.5.11-160-gd2f488b"), "Development build v2.5.11 + 160 commits (d2f488b)")
+        self.assertEqual(development_build_label("onedrive v2.5.11-1-gabcdef0-dirty"), "Development build v2.5.11 + 1 commit (abcdef0), modified")
+        self.assertIsNone(development_build_label("onedrive v2.5.11"))
+        self.assertEqual(development_build_label("onedrive v2.5.11", fork_detected=True), "Files On-Demand build v2.5.11")
+
     def test_weburl_xattr_read(self):
         with tempfile.NamedTemporaryFile(dir=HOME) as f:
             try:
@@ -506,6 +514,41 @@ class MainWindowTests(unittest.TestCase):
             config["config_file"] = original
             stop_mock(other)
             self.assertTrue(wait_until(lambda: "profile-b" not in self.window.attached))
+
+    def run_version_check(self, version_output):
+        from unittest import mock
+
+        def no_network(*_args, **_kwargs):
+            raise OSError("no network in tests")
+
+        session = mock.Mock()
+        session.get.side_effect = no_network
+        self.window.client_version_status["label_text"] = ""
+        self.window.client_version_status["tooltip_text"] = ""
+        page = self.window.profile_status_pages["profile-b"]
+        page.label_version_check.clear()
+        page.label_version_check.setToolTip("")
+        page.label_onedrive_status.setText("")
+        with mock.patch.object(self.main_window_module.subprocess, "check_output", return_value=version_output), mock.patch.object(
+            self.main_window_module.requests, "Session", return_value=session
+        ):
+            self.window.client_version_check()
+        return page, session
+
+    def test_development_build_is_not_compared_with_releases(self):
+        page, session = self.run_version_check(b"onedrive v2.5.11-160-gd2f488b\n")
+        session.get.assert_not_called()
+        self.assertNotIn("Unable to check", page.label_onedrive_status.text())
+        self.assertEqual(page.label_version_check.toolTip(), "OneDrive client: Development build v2.5.11 + 160 commits (d2f488b)")
+        self.assertTrue(page.pushButton_start_stop.isEnabled() or page.profile_name in self.window.attached)
+
+    def test_release_build_keeps_upstream_check(self):
+        from unittest import mock
+
+        with mock.patch.object(self.window.dbus, "instances", {}):
+            page, session = self.run_version_check(b"onedrive v2.5.11\n")
+        session.get.assert_called_once()
+        self.assertIn("Unable to check for latest OneDrive client version!", page.label_onedrive_status.text())
 
     def test_profile_without_client_still_spawns(self):
         decision = od.start_decision(self.main_window_module.global_config["profile-b"], "profile-b" in self.window.attached, False)

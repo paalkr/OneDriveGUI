@@ -43,7 +43,7 @@ from options import (
     version,
 )
 
-from utils.utils import humanize_file_size, shorten_path, format_relative_time
+from utils.utils import development_build_label, humanize_file_size, shorten_path, format_relative_time
 from workers import WorkerThread, MaintenanceWorker, TaskList, workers
 from ondemand_dbus import (
     OneDriveDBus,
@@ -235,6 +235,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             "label_text": "",
             "tooltip_text": "",
             "min_requirements_met": True,
+            "info_text": "",  # e.g. "Development build ...": shown without a warning
         }
         self.gui_version_status = {
             "label_text": "",
@@ -423,24 +424,36 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 version_parts = installed_client_version.replace("v", "").split(".")
                 installed_client_version_num = int("".join(part.zfill(2) for part in version_parts))
 
-                return installed_client_version, installed_client_version_num
+                return installed_client_version, installed_client_version_num, client_version_check.decode(errors="replace").strip()
 
             except Exception as e:
                 logging.error(e)
                 return None
 
         try:
-            latest_client_version = get_latest_client_version()
             installed_client_version = get_installed_client_version()
 
-            logging.info(f"[GUI] Client version check: Installed: {installed_client_version[0]} | Latest: {latest_client_version}")
+            # A development build of the client (git describe suffix) or the Files On-Demand fork
+            # (seen on D-Bus) is not an abraunegg release: do not compare it with the latest release.
+            fork_detected = bool(self.dbus) and any(
+                instance.props.get("OnDemand") or instance.has_capability("ondemand") for instance in self.dbus.instances.values()
+            )
+            development_label = development_build_label(installed_client_version[2], fork_detected) if installed_client_version else None
+            self.client_version_status["info_text"] = ""
+            latest_client_version = None if development_label else get_latest_client_version()
+
+            if installed_client_version:
+                logging.info(f"[GUI] Client version check: Installed: {installed_client_version[2]} | Latest: {latest_client_version or 'not checked'}")
 
             if not installed_client_version:
                 version_label_text = "OneDrive client not found!"
                 version_tooltip_text = "OneDrive client not found!"
                 min_requirements_met = False
 
-            elif not latest_client_version:
+            elif development_label and installed_client_version[1] >= min_supported_version:
+                self.client_version_status["info_text"] = f"OneDrive client: {development_label}"
+
+            elif not latest_client_version and not development_label:
                 version_label_text = "Unable to check for latest OneDrive client version!"
                 version_tooltip_text = "Unable to check for latest OneDrive client version!"
 
@@ -583,6 +596,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             if combined_tooltip_text:
                 page.label_version_check.setToolTip(combined_tooltip_text)
                 page.label_version_check.setPixmap(pixmap_warning)
+            elif self.client_version_status.get("info_text"):
+                page.label_version_check.setToolTip(self.client_version_status["info_text"])
+                page.label_version_check.setPixmap(
+                    themed_icon(["dialog-information-symbolic", "dialog-information"], DIR_PATH + "/resources/images/warning.png").pixmap(20, 20)
+                )
 
     def onedrive_process_status(self):
         # Check OneDrive status and start/stop sync button.
