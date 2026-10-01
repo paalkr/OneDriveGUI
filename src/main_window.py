@@ -1,6 +1,7 @@
 from PySide6.QtCore import QTimer, QUrl, QFileInfo, Qt, Signal, Slot
 from PySide6.QtGui import QIcon, QPixmap, QDesktopServices
 from PySide6.QtWidgets import (
+    QLabel,
     QPushButton,
     QWidget,
     QMainWindow,
@@ -54,6 +55,7 @@ from ondemand_dbus import (
     start_decision,
     tray_state,
 )
+from ondemand_mode import UnitStates, mode_text, profile_mode
 from ondemand_ui import STATE_LABELS, OnDemandStatusWindow, file_type_icon, status_text, themed_icon, tray_icon
 from datetime import datetime
 from gui_settings_window import gui_settings_window
@@ -76,6 +78,9 @@ except ImportError:
 
 
 class MainWindow(QMainWindow, Ui_MainWindow):
+    # Emitted when how a profile runs (on-demand, service/GUI, unit state) or its client state changed.
+    mode_indicators_changed = Signal()
+
     def __init__(self):
         # Expose this instance as main_window.main_window_instance so other modules
         # (e.g. profile_settings_window) can reach it without a circular import.
@@ -183,6 +188,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         # status over D-Bus and never spawns or stops a client for them. Without jeepney or a
         # session bus, self.dbus is None and everything below behaves as upstream.
         self.attached = {}  # profile name -> bus name
+        self.unit_states = UnitStates(self)
+        self.unit_states.changed.connect(lambda _unit: self.refresh_mode_indicators())
+        self.mode_texts = {}
         self.status_windows = {}
         self.attached_transfer_items = {}  # profile name -> {path: (list widget, direction, total)}
         self.tray_menu_signature = None
@@ -585,6 +593,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 self.add_profile(profile_name)
 
         self.match_dbus_instances_if_profiles_changed()
+        self.refresh_mode_indicators()
 
         for profile_name in global_config:
 
@@ -1461,6 +1470,37 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 self.update_attached_page(profile)
         self.refresh_tray_menu()
         self.update_tray_icon()
+        self.mode_indicators_changed.emit()
+
+    def profile_mode(self, profile_name):
+        return profile_mode(global_config[profile_name], self.attached_instance(profile_name), profile_name in workers, self.unit_states)
+
+    def profile_mode_text(self, profile_name, separator=" - "):
+        if profile_name not in global_config:
+            return ""
+        return mode_text(self.profile_mode(profile_name), separator)
+
+    def refresh_mode_indicators(self):
+        """Files On-Demand badge and how the client runs, on every place that shows a profile."""
+        texts = {profile: self.profile_mode_text(profile) for profile in global_config}
+        if texts == self.mode_texts:
+            return
+        self.mode_texts = texts
+
+        for profile, text in texts.items():
+            page = self.profile_status_pages.get(profile)
+            if page is not None:
+                # Short form in the header; the unit and its state are in the tooltip.
+                page.label_mode.setText(mode_text(self.profile_mode(profile), include_unit=False))
+                page.label_mode.setToolTip(text)
+            index = self.comboBox.findText(profile)
+            if index >= 0:
+                self.comboBox.setItemData(index, text, Qt.ToolTipRole)
+            for item in profile_settings_window.listWidget_profiles.findItems(profile, Qt.MatchExactly):
+                item.setToolTip(text)
+
+        self.refresh_tray_menu()
+        self.mode_indicators_changed.emit()
 
     def attached_instance(self, profile_name):
         bus_name = self.attached.get(profile_name)
@@ -1597,7 +1637,13 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             instance = self.attached_instance(profile_name)
             if instance is not None:
                 entries.append(
-                    (profile_name, instance.has_capability("pause"), instance.props.get("State") == "paused", bool(instance.props.get("OnDemand")))
+                    (
+                        profile_name,
+                        instance.has_capability("pause"),
+                        instance.props.get("State") == "paused",
+                        bool(instance.props.get("OnDemand")),
+                        self.profile_mode_text(profile_name, "\n"),
+                    )
                 )
         if entries == self.tray_menu_signature:
             return
@@ -1607,8 +1653,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         for submenu in menu.findChildren(QMenu, options=Qt.FindDirectChildrenOnly):
             submenu.deleteLater()
         menu.clear()
-        for profile_name, can_pause, paused, ondemand in entries:
+        for profile_name, can_pause, paused, ondemand, mode in entries:
             target = menu.addMenu(profile_name) if len(global_config) > 1 else menu
+            for line in mode.splitlines():
+                target.addAction(line).setEnabled(False)
+            target.addSeparator()
             target.addAction("Open folder").triggered.connect(lambda checked=False, p=profile_name: self.open_attached_sync_dir(p))
             view_online = target.addAction("View online")
             view_online.setEnabled(ondemand)
@@ -1666,9 +1715,12 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             return
         if profile_name not in self.status_windows:
             # Parented to the main window (no taskbar entry of its own), still a separate window.
-            self.status_windows[profile_name] = OnDemandStatusWindow(self.dbus, profile_name, self.attached.get, parent=self)
+            self.status_windows[profile_name] = OnDemandStatusWindow(
+                self.dbus, profile_name, self.attached.get, parent=self, mode_lookup=self.profile_mode_text
+            )
             self.status_windows[profile_name].setWindowFlag(Qt.Window, True)
             self.status_windows[profile_name].setAttribute(Qt.WA_QuitOnClose, False)
+            self.mode_indicators_changed.connect(self.status_windows[profile_name].refresh)
         window = self.status_windows[profile_name]
         window.show()
         window.activateWindow()
@@ -1801,6 +1853,13 @@ class ProfileStatusPage(QWidget, Ui_status_page):
 
         # Show Account Type on GUI startup (when sync is not running)
         self.label_account_type.setText(global_config[self.profile_name]["account_type"])
+
+        # How the profile runs: Files On-Demand badge, background service or started by the GUI
+        self.label_mode = QLabel(self.frame)
+        self.label_mode.setStyleSheet("color: rgb(255, 255, 255);")
+        self.label_mode.setAlignment(Qt.AlignCenter)
+        self.label_mode.setWordWrap(True)
+        self.verticalLayout_2.insertWidget(self.verticalLayout_2.indexOf(self.label_account_type) + 1, self.label_mode)
 
         # Allow hyperlinks in status messages
         self.label_onedrive_status.setOpenExternalLinks(True)

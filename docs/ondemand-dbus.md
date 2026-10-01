@@ -114,6 +114,26 @@ now" (the GUI's existing login window) and "Enable service now"
 (`systemctl --user daemon-reload && systemctl --user enable --now <unit>`). Folder selection and
 settings use the existing editors.
 
+**Settings.** Each profile's settings open on a **Basic** page (`src/basic_settings.py`);
+upstream's editor is unchanged under **Advanced**. Basic shows the account, how the profile runs,
+the folder location and folder selection (both edit the Advanced editor's pending values, so
+Save, Discard and the resync confirmation apply), Files On-Demand on/off, start at login
+(`systemctl --user enable|disable` of the profile's unit, applied immediately; `auto_sync` for
+GUI-run profiles), Pause/Resume and, for on-demand profiles with a running client, "Free up
+space for the whole drive" (`user.onedrive.action=free` on every top-level item of the mount).
+For on-demand profiles the Advanced editor uses `src/resources/ondemand_options.json`, generated
+from the client fork's `ondemand/OPTIONS.md` by `scripts/generate_ondemand_options.py` (it records
+the source commit): ignored and refused options are hidden unless "Show all options", risky ones
+get a warning icon and the table's note as tooltip, resync-relevant ones are marked "(resync)".
+Without the JSON the editor is unchanged.
+
+**Mode indicators** (`src/ondemand_mode.py`): "Files On-Demand", and "Runs as background service
+(systemd)", "Started by OneDriveGUI" or "Started outside OneDriveGUI", plus the unit and its
+ActiveState (cached `systemctl --user show`, refreshed every 5 s). Shown on the profile's main
+page (short form; unit in the tooltip), in the status window, as disabled entries at the top of
+the tray submenu, and as tooltips of the profile combobox and the settings profile list (their
+text stays the profile name, which other code looks up).
+
 ## Caveats
 
 - `save_global_config()` rewrites the client config of every GUI profile at each GUI start

@@ -3,11 +3,11 @@
 #  - a private session bus (dbus-run-session), so neither the mock nor the GUI sees a real client,
 #  - a throw-away HOME with two OneDriveGUI profiles, so no real profile or config is read or written,
 #  - QT_QPA_PLATFORM=offscreen, so no window opens.
-# Usage: tests/run_tests.sh [python]   (default: .venv/bin/python)
+# Usage: [PYTHON=...] tests/run_tests.sh [unittest arguments, e.g. a test name]   (default: .venv/bin/python)
 set -eu
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
-python=${1:-$repo/.venv/bin/python}
+python=${PYTHON:-$repo/.venv/bin/python}
 
 home=$(mktemp -d)
 trap 'rm -rf "$home"' EXIT
@@ -34,5 +34,5 @@ free_space =
 EOF
 
 cd "$repo"
-env HOME="$home" ONEDRIVEGUI_TEST_HOME=1 QT_QPA_PLATFORM=offscreen \
-    dbus-run-session -- "$python" tests/test_ondemand.py
+env HOME="$home" ONEDRIVEGUI_TEST_HOME=1 QT_QPA_PLATFORM=offscreen ONEDRIVEGUI_SYSTEMCTL="$repo/tests/fake_systemctl.sh" \
+    dbus-run-session -- "$python" tests/test_ondemand.py "$@"

@@ -112,8 +112,9 @@ def describe_last_sync(unix_time):
 class OnDemandStatusWindow(QWidget):
     """Transfers and issues of one profile attached over D-Bus."""
 
-    def __init__(self, dbus, profile_name, bus_name_lookup, parent=None):
+    def __init__(self, dbus, profile_name, bus_name_lookup, parent=None, mode_lookup=None):
         super().__init__(parent)
+        self.mode_lookup = mode_lookup
         self.dbus = dbus
         self.profile_name = profile_name
         self.bus_name_lookup = bus_name_lookup
@@ -237,9 +238,11 @@ class OnDemandStatusWindow(QWidget):
         details = [props.get("Account") or self.profile_name, f"last sync {describe_last_sync(props.get('LastSyncTime', 0))}"]
         if props.get("QuotaTotal"):
             details.append(f"{humanize_file_size(props['QuotaUsed'])} of {humanize_file_size(props['QuotaTotal'])} used")
-        if props.get("OnDemand"):
+        if props.get("OnDemand") and not self.mode_lookup:
             details.append("Files On-Demand")
         self.label_details.setText(" - ".join(details))
+        if self.mode_lookup:
+            self.label_details.setText(self.label_details.text() + "\n" + self.mode_lookup(self.profile_name))
 
         self.button_sync_now.setEnabled(True)
         self.button_open_sync_dir.setEnabled(bool(props.get("SyncDir")))

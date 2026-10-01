@@ -25,7 +25,7 @@ CONFDIR_A = os.path.join(HOME, ".config", "profile-a")
 CONFDIR_B = os.path.join(HOME, ".config", "profile-b")
 MOUNT_A = os.path.join(HOME, "OneDrive-a")
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
@@ -368,8 +368,10 @@ class MainWindowTests(unittest.TestCase):
         self.assertNotIn("profile-b", menus)
         # QAction.menu() is unsafe in PySide6 (the returned wrapper deletes the menu), so find it as a child.
         submenu = next(m for m in self.window.tray_menu.findChildren(QMenu) if m.title() == "profile-a" and m.menuAction() in self.window.tray_menu.actions())
-        items = [a.text() for a in submenu.actions()]
-        self.assertEqual(items, ["Open folder", "View online", "Pause syncing", "Sync now", "Status and issues"])
+        items = [a.text() for a in submenu.actions() if not a.isSeparator()]
+        info = [a.text() for a in submenu.actions() if not a.isSeparator() and not a.isEnabled()]
+        self.assertEqual(info[0], "Files On-Demand")
+        self.assertEqual(items[len(info):], ["Open folder", "View online", "Pause syncing", "Sync now", "Status and issues"])
         self.assertIn("Quit OneDriveGUI", menus)
 
     def test_status_window_issues(self):
@@ -652,6 +654,204 @@ class ConfigGuardTests(unittest.TestCase):
             self.main_window_globals().pop("guard-page", None)
 
 
+OPTIONS_MD = """# Options in on-demand mode
+
+Some prose.
+
+| Option | Class | Resync | Notes |
+|---|---|---|---|
+| `upload_only` | refused | no | The mount needs downloads. |
+| `download_only` | ignored | no | Has no effect with a mount. |
+| `monitor_interval` | relevant | no | How often to look for online changes. |
+| `skip_dotfiles` | risky | yes | Hidden files vanish from the mount. |
+| `skip_file`, `skip_dir` | relevant-ondemand | yes | Filters what the mount shows. |
+| `thing` | brandnew | maybe | Unknown class. |
+
+| Other table | Value |
+|---|---|
+| `x` | y |
+"""
+
+
+class OptionsTableTests(unittest.TestCase):
+    def test_parse_markdown(self):
+        from ondemand_options import parse_options_markdown
+
+        table = parse_options_markdown(OPTIONS_MD)
+        self.assertEqual(table["upload_only"], {"class": "refused", "resync": False, "notes": "The mount needs downloads."})
+        self.assertEqual(table["skip_dotfiles"]["class"], "risky")
+        self.assertTrue(table["skip_dotfiles"]["resync"])
+        self.assertEqual(table["skip_dir"], table["skip_file"])
+        self.assertEqual(table["thing"]["class"], "unknown")
+        self.assertNotIn("x", table)
+
+    def test_generator_records_source_commit(self):
+        from ondemand_options import load_options_table
+
+        repo = tempfile.mkdtemp(dir=HOME)
+        source = os.path.join(repo, "OPTIONS.md")
+        with open(source, "w") as f:
+            f.write(OPTIONS_MD)
+        git = ["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run(["git", "init", "-q", repo], check=True)
+        subprocess.run(git + ["add", "OPTIONS.md"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "options"], check=True)
+        commit = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+
+        output = os.path.join(repo, "options.json")
+        script = os.path.join(os.path.dirname(TESTS_DIR), "scripts", "generate_ondemand_options.py")
+        subprocess.run([sys.executable, script, source, output], check=True, capture_output=True)
+        with open(output) as f:
+            data = __import__("json").load(f)
+        self.assertEqual(data["source_commit"], commit)
+        self.assertEqual(load_options_table(output)["upload_only"]["class"], "refused")
+        self.assertEqual(load_options_table(os.path.join(repo, "missing.json")), {})
+
+
+class SettingsPageTests(unittest.TestCase):
+    """Basic page, Advanced annotations and mode indicators, on profiles in the temp HOME."""
+
+    @classmethod
+    def setUpClass(cls):
+        import main_window
+        import profile_settings_window as psw
+
+        cls.psw = psw
+        cls.main_window_module = main_window
+        cls.window = main_window.main_window_instance or main_window.MainWindow()
+        cls.mock = start_mock(CONFDIR_A, "--syncdir", MOUNT_A)
+
+    @classmethod
+    def tearDownClass(cls):
+        stop_mock(cls.mock)
+
+    def page(self, profile):
+        layout = self.psw.profile_settings_window.stackedLayout
+        return next(layout.widget(i) for i in range(layout.count()) if getattr(layout.widget(i), "profile", None) == profile)
+
+    def test_basic_tab_is_first_and_advanced_holds_upstream_editor(self):
+        page = self.page("profile-a")
+        tabs = page.tabWidget_basic_advanced
+        self.assertEqual([tabs.tabText(i) for i in range(tabs.count())], ["Basic", "Advanced"])
+        self.assertEqual(tabs.currentIndex(), 0)
+        self.assertIs(page.tabWidget.parentWidget().parentWidget().parentWidget(), tabs)
+
+    def test_options_table_hides_marks_and_show_all(self):
+        from ondemand_options import parse_options_markdown
+
+        table = parse_options_markdown(OPTIONS_MD)
+        from unittest import mock
+
+        with mock.patch.object(self.psw, "load_options_table", return_value=table):
+            page = self.psw.ProfileSettingsPage("profile-a")  # on-demand
+            plain = self.psw.ProfileSettingsPage("profile-b")
+        self.assertTrue(page.checkBox_upload_only.isHidden())
+        self.assertTrue(page.checkBox_download_only.isHidden())
+        self.assertFalse(page.checkBox_show_all_options.isHidden())
+        self.assertIn("Refused in Files On-Demand mode", page.checkBox_upload_only.toolTip())
+        self.assertFalse(page.checkBox_skip_dotfiles.icon().isNull())
+        self.assertIn("Hidden files vanish", page.checkBox_skip_dotfiles.toolTip())
+        self.assertTrue(page.checkBox_skip_dotfiles.text().endswith("(resync)"))
+        self.assertIn("--resync", page.checkBox_skip_dotfiles.toolTip())
+        page.checkBox_show_all_options.setChecked(True)
+        self.assertFalse(page.checkBox_upload_only.isHidden())
+        page.checkBox_show_all_options.setChecked(False)
+        self.assertTrue(page.checkBox_upload_only.isHidden())
+        # Not on-demand: upstream editor unchanged.
+        self.assertFalse(plain.checkBox_upload_only.isHidden())
+        self.assertTrue(plain.checkBox_show_all_options.isHidden())
+        self.assertFalse(plain.checkBox_skip_dotfiles.text().endswith("(resync)"))
+
+    def test_folder_location_change_asks_for_resync(self):
+        from unittest import mock
+
+        page = self.page("profile-a")
+        basic = page.basic_page
+        basic.lineEdit_folder.setText("~/Elsewhere")
+        basic.folder_edited("~/Elsewhere")
+        self.assertEqual(page.lineEdit_sync_dir.text(), "~/Elsewhere")
+        with mock.patch.object(self.psw.QMessageBox, "question", return_value=self.psw.QMessageBox.No) as question:
+            page.save_clicked()
+        self.assertIn("sync_dir", question.call_args[0][2])
+        page.discard_changes()
+
+    def test_folder_selection_mirrors_sync_list_editor(self):
+        page = self.page("profile-a")
+        page.basic_page.textEdit_folders.setPlainText("/Documents\n")
+        self.assertEqual(page.textEdit_sync_list.toPlainText(), "/Documents\n")
+        page.textEdit_sync_list.setPlainText("/Photos\n")
+        self.assertEqual(page.basic_page.textEdit_folders.toPlainText(), "/Photos\n")
+        page.discard_changes()
+        page.textEdit_sync_list.setPlainText(page.read_sync_list())
+
+    def test_start_at_login_uses_unit_for_service_profiles_and_auto_sync_otherwise(self):
+        log = os.path.join(HOME, "systemctl.log")
+        basic = self.page("profile-a").basic_page
+        basic.refresh()
+        self.assertTrue(wait_until(lambda: "onedrive-ondemand@profile-a.service" in basic.checkBox_start_at_login.text() and basic.checkBox_start_at_login.isEnabled() or basic.refresh()))
+        basic.checkBox_start_at_login.setChecked(True)
+        basic.start_at_login_clicked(True)
+        self.assertTrue(wait_until(lambda: os.path.exists(log) and "--user enable onedrive-ondemand@profile-a.service" in open(log).read()))
+        basic.start_at_login_clicked(False)
+        self.assertTrue(wait_until(lambda: "--user disable onedrive-ondemand@profile-a.service" in open(log).read()))
+
+        plain = self.page("profile-b").basic_page
+        plain.refresh()
+        self.assertEqual(plain.checkBox_start_at_login.text(), "Start syncing when OneDriveGUI starts")
+        before = self.page("profile-b").checkBox_auto_sync.isChecked()
+        plain.start_at_login_clicked(not before)
+        self.assertEqual(self.page("profile-b").checkBox_auto_sync.isChecked(), not before)
+        self.page("profile-b").discard_changes()
+        self.assertNotIn("profile-b", open(log).read())
+
+    def test_free_up_space(self):
+        from unittest import mock
+        import ondemand_mode
+
+        os.makedirs(os.path.join(MOUNT_A, "Documents"), exist_ok=True)
+        os.makedirs(os.path.join(MOUNT_A, "Photos"), exist_ok=True)
+        with open(os.path.join(MOUNT_A, "root.txt"), "w") as f:
+            f.write("x")
+        try:
+            os.setxattr(os.path.join(MOUNT_A, "root.txt"), "user.onedrive.action", b"free")
+        except OSError:
+            self.skipTest("user xattrs not supported here")
+        accepted, refused = ondemand_mode.free_up_space(MOUNT_A)
+        self.assertEqual(accepted, ["Documents", "Photos", "root.txt"])
+        self.assertEqual(os.getxattr(os.path.join(MOUNT_A, "Photos"), "user.onedrive.action"), b"free")
+
+        self.assertTrue(wait_until(lambda: "profile-a" in self.window.attached))
+        basic = self.page("profile-a").basic_page
+        basic.refresh()
+        self.assertTrue(basic.pushButton_free_space.isEnabled())
+        self.assertIn("Removes the local copies", basic.label_free_space.text())
+        with mock.patch("basic_settings.QMessageBox.question", return_value=self.psw.QMessageBox.Yes) as question:
+            basic.free_up_space_clicked()
+        self.assertIn("unpinned", question.call_args[0][2])
+        self.assertTrue(wait_until(lambda: "Requested for 3 item(s)" in basic.label_free_space.text()))
+        self.assertFalse(self.page("profile-b").basic_page.pushButton_free_space.isVisibleTo(self.page("profile-b").basic_page))
+
+    def test_mode_indicators(self):
+        state_file = os.path.join(HOME, "systemd", "onedrive-ondemand@profile-a.service")
+        os.makedirs(os.path.dirname(state_file), exist_ok=True)
+        with open(state_file, "w") as f:
+            f.write("active enabled")
+        self.window.unit_states.states.clear()
+        self.assertTrue(wait_until(lambda: "profile-a" in self.window.attached))
+        expected = "Files On-Demand - Runs as background service (systemd) - onedrive-ondemand@profile-a.service: active"
+        self.assertTrue(wait_until(lambda: self.window.onedrive_process_status() or self.window.profile_status_pages["profile-a"].label_mode.toolTip() == expected))
+        self.assertEqual(self.window.profile_status_pages["profile-a"].label_mode.text(), "Files On-Demand - Runs as background service (systemd)")
+        index = self.window.comboBox.findText("profile-a")
+        self.assertEqual(self.window.comboBox.itemData(index, Qt.ToolTipRole), expected)
+        item = self.psw.profile_settings_window.listWidget_profiles.findItems("profile-a", Qt.MatchExactly)[0]
+        self.assertEqual(item.toolTip(), expected)
+        self.assertEqual(self.window.profile_status_pages["profile-b"].label_mode.text(), "Started by OneDriveGUI")
+        self.window.show_status_window("profile-a")
+        self.assertIn(expected, self.window.status_windows["profile-a"].label_details.text())
+        self.window.status_windows["profile-a"].close()
+        os.remove(state_file)
+
+
 class QuitBehaviourTests(unittest.TestCase):
     """Runs last: it quits the application's event loop."""
 
@@ -737,6 +937,17 @@ class QuitBehaviourTests(unittest.TestCase):
                 first.kill()
                 first.wait()
             first.stdout.close()
+
+
+def load_tests(loader, tests, pattern):
+    # QuitBehaviourTests ends the application's event loop and stops the D-Bus client: run it last.
+    suite = unittest.TestSuite()
+    last = unittest.TestSuite()
+    for test in tests:
+        for case in test:
+            (last if isinstance(case, QuitBehaviourTests) else suite).addTest(case)
+    suite.addTests(last)
+    return suite
 
 
 if __name__ == "__main__":

@@ -1,6 +1,10 @@
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QLabel,
+    QTabWidget,
+    QVBoxLayout,
     QWidget,
     QStackedLayout,
     QAbstractItemView,
@@ -25,6 +29,7 @@ from configparser import ConfigParser
 import wizard
 from global_config import RESYNC_RELEVANT_KEYS, changed_config_keys, is_client_owned, save_global_config
 from ondemand_dbus import is_ondemand_profile, profile_confdir, profile_systemd_unit
+from ondemand_options import HIDDEN_CLASSES, load_options_table
 
 # Import main_window (lazy import to avoid circular references)
 import main_window
@@ -278,6 +283,9 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
         # Configures widget connect actions
         self.configure_connect_actions()
 
+        # Basic page first; upstream's full editor moves under "Advanced".
+        self.configure_basic_and_advanced_tabs()
+
         # Buttons
         self.pushButton_discard.clicked.connect(self.discard_changes)
         self.pushButton_save.clicked.connect(self.save_clicked)
@@ -287,6 +295,90 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
         self.timer_unsaved_changes.setSingleShot(False)
         self.timer_unsaved_changes.timeout.connect(self.check_for_unsaved_changes)
         self.timer_unsaved_changes.stop()
+
+    def configure_basic_and_advanced_tabs(self):
+        from basic_settings import BasicSettingsPage
+
+        index = self.verticalLayout_13.indexOf(self.tabWidget)
+        self.verticalLayout_13.removeWidget(self.tabWidget)
+
+        self.checkBox_show_all_options = QCheckBox("Show all options")
+        self.checkBox_show_all_options.setToolTip("Also show options the Files On-Demand client ignores or refuses")
+        self.checkBox_show_all_options.toggled.connect(self.apply_options_table)
+
+        advanced = QWidget()
+        advanced_layout = QVBoxLayout(advanced)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_layout.addWidget(self.checkBox_show_all_options)
+        advanced_layout.addWidget(self.tabWidget)
+
+        self.basic_page = BasicSettingsPage(self)
+        self.tabWidget_basic_advanced = QTabWidget()
+        self.tabWidget_basic_advanced.addTab(self.basic_page, "Basic")
+        self.tabWidget_basic_advanced.addTab(advanced, "Advanced")
+        self.verticalLayout_13.insertWidget(index, self.tabWidget_basic_advanced)
+
+        self.options_hidden_widgets = set()
+        self.options_original_texts = {}
+        self.options_table = load_options_table() if is_ondemand_profile(global_config.get(self.profile, self.temp_profile_config)) else {}
+        self.checkBox_show_all_options.setVisible(bool(self.options_table))
+        self.apply_options_table()
+
+    def option_widgets(self, key):
+        widgets = []
+        for prefix in ("checkBox", "spinBox", "lineEdit", "comboBox", "groupBox", "label"):
+            widget = self.findChild(QWidget, f"{prefix}_{key}")
+            if widget is not None:
+                widgets.append(widget)
+        browse = self.findChild(QWidget, f"pushButton_{key}_browse")
+        if browse is not None:
+            widgets.append(browse)
+        return widgets
+
+    def apply_options_table(self):
+        """
+        Files On-Demand profiles: hide options the on-demand client ignores or refuses (unless
+        "Show all options"), and mark risky and resync-relevant ones, from ondemand/OPTIONS.md.
+        """
+        show_all = self.checkBox_show_all_options.isChecked()
+        warning = DIR_PATH + "/resources/images/warning.png"
+        for key, info in self.options_table.items():
+            widgets = self.option_widgets(key)
+            hide = info["class"] in HIDDEN_CLASSES and not show_all
+            notes = []
+            if info["class"] in HIDDEN_CLASSES:
+                notes.append(f"{'Ignored' if info['class'] == 'ignored' else 'Refused'} in Files On-Demand mode.")
+            if info["class"] == "risky":
+                notes.append("Risky in Files On-Demand mode.")
+            if info.get("notes"):
+                notes.append(info["notes"])
+            if info.get("resync"):
+                notes.append("Changing it makes the client require --resync.")
+            tooltip = " ".join(notes)
+
+            for widget in widgets:
+                if hide:
+                    # Only widgets hidden here are shown again later, not ones upstream hides.
+                    if not widget.isHidden():
+                        widget.hide()
+                        self.options_hidden_widgets.add(widget)
+                elif widget in self.options_hidden_widgets:
+                    widget.show()
+                    self.options_hidden_widgets.discard(widget)
+                if tooltip:
+                    widget.setToolTip(tooltip)
+
+                # Visible markers on the widget that carries the option's name.
+                if isinstance(widget, (QLabel, QCheckBox)):
+                    original = self.options_original_texts.setdefault(widget, widget.text())
+                    suffix = " (resync)" if info.get("resync") else ""
+                    if isinstance(widget, QCheckBox):
+                        widget.setText(original + suffix)
+                        if info["class"] == "risky":
+                            widget.setIcon(QIcon(warning))
+                    else:
+                        marker = f' <img src="{warning}" width="14" height="14">' if info["class"] == "risky" else ""
+                        widget.setText(original + suffix + marker)
 
     def check_for_unsaved_changes(self):
         """
