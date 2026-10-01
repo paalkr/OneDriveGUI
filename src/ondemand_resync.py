@@ -20,9 +20,11 @@ SHOW_PROPERTIES = "ActiveState,SubState,Result,InvocationID,LoadState"
 
 
 def resync_unit_for_profile(profile_dir_name):
-    """One-shot rebuild unit of ~/.config/<profile_dir_name> (scheme from the onedrive-ondemand package)."""
-    if profile_dir_name == "onedrive-ondemand":
-        return "onedrive-ondemand-resync.service"
+    """
+    One-shot rebuild unit of ~/.config/<profile_dir_name>. Always the template instance, also for the
+    default profile (installer c539994). Type=oneshot: activating while running, then inactive on
+    success or failed; it stops the normal unit and starts it again only after a successful rebuild.
+    """
     return f"onedrive-ondemand-resync@{profile_dir_name}.service"
 
 

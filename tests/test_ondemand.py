@@ -187,6 +187,12 @@ class PureLogicTests(unittest.TestCase):
         self.assertIsNone(development_build_label("onedrive v2.5.11"))
         self.assertEqual(development_build_label("onedrive v2.5.11", fork_detected=True), "Files On-Demand build v2.5.11")
 
+    def test_resync_unit_names(self):
+        from ondemand_resync import resync_unit_for_profile
+
+        self.assertEqual(resync_unit_for_profile("onedrive-ondemand"), "onedrive-ondemand-resync@onedrive-ondemand.service")
+        self.assertEqual(resync_unit_for_profile("work"), "onedrive-ondemand-resync@work.service")
+
     def test_weburl_xattr_read(self):
         with tempfile.NamedTemporaryFile(dir=HOME) as f:
             try:
