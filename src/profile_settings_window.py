@@ -782,7 +782,9 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
         if is_ondemand_profile(profile):
             # Files On-Demand: a resync rebuilds the index only; it does not re-download anything.
             text += (
-                "The client rebuilds its local index of your OneDrive. Files already downloaded stay on this "
+                "Saving is not enough: one manual step follows, a rebuild of the client's local index (the "
+                "commands are below; until it has run, this profile does not sync). "
+                "The rebuild does not touch your files: files already downloaded stay on this "
                 "device and are not downloaded again; online-only files stay online-only. Files you chose to "
                 "always keep on this device stay that way. Nothing is uploaded or deleted by the rebuild itself."
             )
@@ -792,7 +794,7 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
         if is_ondemand_profile(profile) and unit:
             confdir = profile_confdir(profile)
             text += (
-                "<br><br>After saving, restart the service with a resync:<br>"
+                "<br><br>The step after saving: stop the service, run the rebuild once in a terminal, start the service:<br>"
                 f"<tt>systemctl --user stop {unit}</tt><br>"
                 f"<tt>onedrive --confdir={confdir} --monitor --on-demand --resync --resync-auth</tt><br>"
                 "(stop it with Ctrl+C once the rebuild has completed)<br>"

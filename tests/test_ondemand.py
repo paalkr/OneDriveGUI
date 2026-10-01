@@ -682,7 +682,7 @@ class ConfigGuardTests(unittest.TestCase):
                 self.assertIn("--resync", message)
                 self.assertIn("systemctl --user stop onedrive-ondemand@guard-page.service", message)
                 self.assertIn("--monitor --on-demand --resync --resync-auth", message)
-                self.assertIn("rebuilds its local index", message)
+                self.assertIn("Saving is not enough: one manual step follows, a rebuild of the client's local index", message)
                 self.assertIn("not downloaded again; online-only files stay online-only", message)
                 self.assertIn("Nothing is uploaded or deleted by the rebuild itself", message)
                 self.assertNotIn("rebuilds the local state", message)
@@ -856,6 +856,11 @@ class SettingsPageTests(unittest.TestCase):
         question.assert_called_once()
         self.assertIn("is unmounted and the files appear at <b>~/Elsewhere</b> after the service restarts", question.call_args[0][2])
         page.discard_changes()
+
+    def test_basic_notes_say_the_rebuild_is_a_manual_step(self):
+        basic = self.page("profile-a").basic_page
+        basic.refresh()
+        self.assertIn("needs a manual step after saving", basic.label_folders_note.text())
 
     def test_folder_selection_mirrors_sync_list_editor(self):
         page = self.page("profile-a")
@@ -1164,7 +1169,7 @@ class ResyncWordingTests(unittest.TestCase):
         page.temp_profile_config["onedrive"]["sync_dir"] = '"~/Elsewhere"'
         with mock.patch.object(self.psw.QMessageBox, "question", return_value=self.psw.QMessageBox.No) as question:
             page.save_clicked()
-        self.assertIn("rebuilds its local index", question.call_args[0][2])
+        self.assertIn("a rebuild of the client's local index", question.call_args[0][2])
 
 
 class QuitBehaviourTests(unittest.TestCase):

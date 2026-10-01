@@ -167,10 +167,16 @@ class BasicSettingsPage(QWidget):
 
         if mode["ondemand"]:
             if self.settings_page.is_resync_key("sync_dir"):
-                self.label_folder_note.setText("Changing the folder makes the client rebuild its local index; downloaded files are kept (you are asked before saving).")
+                self.label_folder_note.setText(
+                    "Changing the folder needs a manual step after saving: rebuilding the client's local index "
+                    "(the commands are shown when you save). Downloaded files are kept."
+                )
             else:
                 self.label_folder_note.setText("Changing the folder moves where OneDrive appears when the service restarts (you are asked before saving).")
-            self.label_folders_note.setText("Changing the folder selection makes the client rebuild its local index; downloaded files are kept (you are asked before saving).")
+            self.label_folders_note.setText(
+                "Changing the folder selection needs a manual step after saving: rebuilding the client's local "
+                "index (the commands are shown when you save). Downloaded files are kept."
+            )
         else:
             self.label_folder_note.setText("Changing the folder makes the client resynchronise everything (you are asked before saving).")
             self.label_folders_note.setText("Changing the folder selection makes the client resynchronise (you are asked before saving).")
