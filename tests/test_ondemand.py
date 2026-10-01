@@ -884,6 +884,16 @@ class SettingsPageTests(unittest.TestCase):
         self.assertEqual(self.window.comboBox.itemData(index, Qt.ToolTipRole), expected)
         item = self.psw.profile_settings_window.listWidget_profiles.findItems("profile-a", Qt.MatchExactly)[0]
         self.assertEqual(item.toolTip(), expected)
+        # The settings window's unsaved-changes check updates the same tooltip and must keep the mode part.
+        page = self.page("profile-a")
+        page.check_for_unsaved_changes()
+        self.assertEqual(item.toolTip(), expected)
+        page.temp_profile_config["onedrive"]["monitor_interval"] = '"999"'
+        page.check_for_unsaved_changes()
+        self.assertEqual(item.toolTip(), "This profile has unsaved configuration changes.\n" + expected)
+        page.discard_changes()
+        page.check_for_unsaved_changes()
+        self.assertEqual(item.toolTip(), expected)
         self.assertEqual(self.window.profile_status_pages["profile-b"].label_mode.text(), "Started by OneDriveGUI")
         self.window.show_status_window("profile-a")
         self.assertIn(expected, self.window.status_windows["profile-a"].label_details.text())

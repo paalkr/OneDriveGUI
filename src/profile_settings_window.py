@@ -250,6 +250,23 @@ class ProfileSettingsWindow(QWidget, Ui_profile_settings_window):
         # If ok is True but new_name is empty, the validation message box is shown.
 
 
+UNSAVED_TOOLTIP_ROLE = Qt.UserRole + 1
+MODE_TOOLTIP_ROLE = Qt.UserRole + 2
+
+
+def set_profile_item_tooltip(item, unsaved=None, mode=None):
+    """
+    The profile list tooltip has two independent parts: the unsaved-changes note (this window's
+    timer) and how the profile runs (the main window). Updating one keeps the other.
+    """
+    if unsaved is not None:
+        item.setData(UNSAVED_TOOLTIP_ROLE, unsaved)
+    if mode is not None:
+        item.setData(MODE_TOOLTIP_ROLE, mode)
+    parts = [item.data(UNSAVED_TOOLTIP_ROLE), item.data(MODE_TOOLTIP_ROLE)]
+    item.setToolTip("\n".join(part for part in parts if part))
+
+
 class ListItemDelegate(QStyledItemDelegate):
     """
     Ensures a warning icon for unsaved profile changes is shown right of the profile name.
@@ -424,7 +441,7 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
         # Show warning if any configuration change was detected.
         if any([config_changed, sync_list_changed]):
             unsaved_profile.setIcon(pixmap_warning)
-            unsaved_profile.setToolTip("This profile has unsaved configuration changes.")
+            set_profile_item_tooltip(unsaved_profile, unsaved="This profile has unsaved configuration changes.")
 
             # Show messageBox when closing window with unsaved changes.
             if self.profile not in profile_settings_window.unsaved_profiles:
@@ -432,7 +449,7 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
         else:
             pixmap_warning = QPixmap().isNull()
             unsaved_profile.setIcon(QIcon())
-            unsaved_profile.setToolTip("")
+            set_profile_item_tooltip(unsaved_profile, unsaved="")
 
             # Don't show messageBox when closing window without unsaved changes.
             if self.profile in profile_settings_window.unsaved_profiles:

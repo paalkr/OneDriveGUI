@@ -34,7 +34,7 @@ import subprocess
 
 
 from wizard import setup_wizard
-from profile_settings_window import profile_settings_window
+from profile_settings_window import profile_settings_window, set_profile_item_tooltip
 
 from options import (
     global_config,
@@ -193,6 +193,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.unit_states = UnitStates(self)
         self.unit_states.changed.connect(lambda _unit: self.refresh_mode_indicators())
         self.mode_texts = {}
+        self.service_actions = set()  # profiles with a start/stop/restart in flight
         self.status_windows = {}
         self.attached_transfer_items = {}  # profile name -> {path: (list widget, direction, total)}
         self.tray_menu_signature = None
@@ -1485,6 +1486,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     def refresh_mode_indicators(self):
         """Files On-Demand badge and how the client runs, on every place that shows a profile."""
         texts = {profile: self.profile_mode_text(profile) for profile in global_config}
+        # Every pass, not only on a text change: attaching/detaching rewrites the status line,
+        # and a stopped service must still read "Stopped (background service)" afterwards.
+        for profile in global_config:
+            if profile in self.profile_status_pages:
+                self.update_service_button(profile, self.profile_mode(profile))
         if texts == self.mode_texts:
             return
         self.mode_texts = texts
@@ -1496,12 +1502,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 # Short form in the header; the unit and its state are in the tooltip.
                 page.label_mode.setText(mode_text(mode, include_unit=False))
                 page.label_mode.setToolTip(text)
-                self.update_service_button(profile, mode)
             index = self.comboBox.findText(profile)
             if index >= 0:
                 self.comboBox.setItemData(index, text, Qt.ToolTipRole)
             for item in profile_settings_window.listWidget_profiles.findItems(profile, Qt.MatchExactly):
-                item.setToolTip(text)
+                set_profile_item_tooltip(item, mode=text)
 
         self.refresh_tray_menu()
         self.mode_indicators_changed.emit()
@@ -1641,7 +1646,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         running = mode["active"] in ACTIVE_STATES
         page.pushButton_service.setText("Stop background service" if running else "Start background service")
         page.pushButton_service.setToolTip(f"{unit}: {mode['active']}")
-        if profile_name not in self.attached and profile_name not in workers:
+        if profile_name not in self.attached and profile_name not in workers and profile_name not in self.service_actions:
             if mode["active"] in ("inactive", "failed", "deactivating"):
                 page.label_onedrive_status.setText("Stopped (background service)" if mode["active"] != "failed" else f"Background service failed ({unit})")
             elif mode["active"] in ACTIVE_STATES:
@@ -1669,6 +1674,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 f"Could not {action} the background service",
                 f"<b>systemctl --user {action} {unit}</b> failed (state: {active}).<br><br><pre>{message}</pre>",
             )
+        self.service_actions.discard(profile_name)
         self.mode_texts = {}
         self.refresh_mode_indicators()
         self.service_action_finished.emit(profile_name, action, ok, message, active)
@@ -1679,6 +1685,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if not unit:
             return False
         self.profile_status_pages[profile_name].label_onedrive_status.setText(f"Starting {unit} ...")
+        self.service_actions.add(profile_name)
         self.unit_states.start_stop(unit, "start", lambda ok, message, active: self.report_service_result(profile_name, "start", ok, message, active))
         return True
 
@@ -1713,6 +1720,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if answer != QMessageBox.Yes:
             return False
         self.profile_status_pages[profile_name].label_onedrive_status.setText(f"Stopping {unit} ...")
+        self.service_actions.add(profile_name)
         self.unit_states.start_stop(unit, "stop", lambda ok, message, active: self.report_service_result(profile_name, "stop", ok, message, active))
         return True
 
