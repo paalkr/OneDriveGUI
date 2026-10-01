@@ -728,6 +728,9 @@ class ShippedOptionsTableTests(unittest.TestCase):
 
         page = psw.ProfileSettingsPage("profile-a")  # on-demand profile: real table applies
         self.assertTrue(page.checkBox_upload_only.isHidden())
+        self.assertEqual(table["dry_run"]["class"], "refused")  # refused with --on-demand since f9000c3
+        self.assertTrue(page.checkBox_dry_run.isHidden())
+        self.assertTrue(page.checkBox_mirror_local_state.isHidden())
         self.assertFalse(page.lineEdit_sync_dir.isHidden())
         self.assertFalse(page.checkBox_use_recycle_bin.icon().isNull())  # risky
         self.assertTrue(page.checkBox_skip_dotfiles.text().endswith("(resync)"))

@@ -1,6 +1,6 @@
 {
   "source": "ondemand/OPTIONS.md",
-  "source_commit": "90fe5b4a76d74e1e301dad5c31353bfb1a029496",
+  "source_commit": "f9000c328fcd3bf72209e04f78f1a063b3e2430b",
   "options": {
     "application_id": {
       "class": "relevant",
@@ -158,9 +158,9 @@
       "notes": "SharePoint library selection."
     },
     "dry_run": {
-      "class": "risky",
+      "class": "refused",
       "resync": false,
-      "notes": "Uses a copy of the database and fakes engine transfers."
+      "notes": "Refused with --on-demand: a dry run would fake engine transfers while the mount changes real local data."
     },
     "enable_logging": {
       "class": "relevant",
@@ -218,9 +218,9 @@
       "notes": "CurlEngine pool."
     },
     "mirror_local_state": {
-      "class": "risky",
+      "class": "refused",
       "resync": false,
-      "notes": "With local_first: online items queued for download are deleted online instead (sync.d:3445-3457), and new online folders are deleted online (sync.d:3918-3922)."
+      "notes": "Refused with --on-demand: with local_first it would delete online files and folders that are online-only here."
     },
     "monitor_authoritative_sync": {
       "class": "ignored",
@@ -325,7 +325,7 @@
     "recycle_bin_path": {
       "class": "risky",
       "resync": false,
-      "notes": "See use_recycle_bin."
+      "notes": "Refused inside sync_dir (the mount) or the backing dir."
     },
     "remove_source_files": {
       "class": "ignored",
@@ -435,7 +435,7 @@
     "use_recycle_bin": {
       "class": "risky",
       "resync": false,
-      "notes": "Online deletions move backing-dir files to the recycle bin (online-only files have no local file, so nothing moves)."
+      "notes": "Online deletions move local files to the recycle bin; a recycle bin inside sync_dir (the mount) or the backing dir is refused."
     },
     "user_agent": {
       "class": "relevant",
