@@ -1,6 +1,7 @@
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QProcess, Qt, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
+    QMessageBox,
     QVBoxLayout,
     QLabel,
     QWizard,
@@ -32,6 +33,7 @@ from options import (
 )
 
 from workers import MaintenanceWorker
+import ondemand_profile
 import logging
 from global_config import DIR_PATH, PROFILES_FILE
 
@@ -50,6 +52,7 @@ class SetupWizard(QWizard):
         self.setPage(4, wizardPage_create(self))
         self.setPage(5, wizardPage_import(self))
         self.setPage(6, wizardPage_create_shared_library(self))
+        self.setPage(7, wizardPage_create_ondemand(self))
         self.setPage(10, wizardPage_finish(self))
 
         self.setWindowTitle("OneDriveGUI Setup Wizard")
@@ -93,9 +96,14 @@ class SetupWizard(QWizard):
             selection_page.checkBox_create.setChecked(False)
             selection_page.checkBox_import.setChecked(False)
             selection_page.checkBox_sharepoint_library.setChecked(False)
+            selection_page.checkBox_ondemand.setChecked(False)
             selection_page.checkBox_create.setEnabled(True)
             selection_page.checkBox_import.setEnabled(True)
             selection_page.checkBox_sharepoint_library.setEnabled(True)
+            selection_page.checkBox_ondemand.setEnabled(True)
+
+        # Reset the Files On-Demand page
+        self.page(7).reset()
 
     def on_page_change(self):
         if self.currentId() == 2:
@@ -117,11 +125,15 @@ class SetupWizard(QWizard):
                 return 5
             elif self.page(3).checkBox_sharepoint_library.isChecked():
                 return 6
+            elif self.page(3).checkBox_ondemand.isChecked():
+                return 7
         if self.currentPage() == self.page(4):
             return 10
         if self.currentPage() == self.page(5):
             return 10
         if self.currentPage() == self.page(6):
+            return 10
+        if self.currentPage() == self.page(7):
             return 10
         if self.currentPage() == self.page(10):
             self.show_main_window_signal.emit()
@@ -232,46 +244,37 @@ class wizardPage_create_import(QWizardPage):
         self.checkBox_sharepoint_library.setText("Add SharePoint Shared Library")
         self.checkBox_sharepoint_library.stateChanged.connect(self.on_checkbox_change)
 
+        self.checkBox_ondemand = QCheckBox()
+        self.checkBox_ondemand.setText("Create new Files On-Demand profile (runs as a systemd user service)")
+        self.checkBox_ondemand.stateChanged.connect(self.on_checkbox_change)
+
         layout = QVBoxLayout()
         layout.addWidget(self.checkBox_create)
         layout.addWidget(self.checkBox_import)
         layout.addWidget(self.checkBox_sharepoint_library)
+        layout.addWidget(self.checkBox_ondemand)
         self.setLayout(layout)
 
+        # Only offered when the on-demand client (onedrive-ondemand package) is installed.
+        if not ondemand_profile.setup_tool_path():
+            self.checkBox_ondemand.hide()
+
+    def checkboxes(self):
+        return [self.checkBox_create, self.checkBox_import, self.checkBox_sharepoint_library, self.checkBox_ondemand]
+
     def on_checkbox_change(self):
-        if self.checkBox_create.isChecked():
-            logging.info(f"Create new profile is checked")
-            self.checkBox_import.setDisabled(True)
-            self.checkBox_sharepoint_library.setDisabled(True)
-            self.completeChanged.emit()
-
-        elif self.checkBox_import.isChecked():
-            logging.info(f"Import profile is checked")
-            self.checkBox_create.setDisabled(True)
-            self.checkBox_sharepoint_library.setDisabled(True)
-            self.completeChanged.emit()
-
-        elif self.checkBox_sharepoint_library.isChecked():
-            logging.info(f"SharePoint Shared Library is checked")
-            self.checkBox_create.setDisabled(True)
-            self.checkBox_import.setDisabled(True)
-            self.completeChanged.emit()
-
+        # Exactly one option can be checked; the others are disabled while it is.
+        checked = [box for box in self.checkboxes() if box.isChecked()]
+        if checked:
+            logging.info(f"{checked[0].text()} is checked")
         else:
             logging.info(f"No option is checked")
-            self.checkBox_import.setDisabled(False)
-            self.checkBox_create.setDisabled(False)
-            self.checkBox_sharepoint_library.setDisabled(False)
-            self.completeChanged.emit()
+        for box in self.checkboxes():
+            box.setDisabled(bool(checked) and box is not checked[0])
+        self.completeChanged.emit()
 
     def isComplete(self):
-        if any(
-            [
-                self.checkBox_create.isChecked(),
-                self.checkBox_import.isChecked(),
-                self.checkBox_sharepoint_library.isChecked(),
-            ]
-        ):
+        if any(box.isChecked() for box in self.checkboxes()):
             logging.info("Wizard page is complete.")
             return True
         else:
@@ -916,6 +919,170 @@ class wizardPage_import(QWizardPage):
         self.lineEdit_config_path.setDisabled(True)
         self.pushButton_browse.setDisabled(True)
         self.completeChanged.emit()
+
+
+class wizardPage_create_ondemand(QWizardPage):
+    """
+    Creates a Files On-Demand profile with onedrive-ondemand-setup. The client for it runs as the
+    systemd user unit onedrive-ondemand@<profile>.service, not as a process started by the GUI.
+    """
+
+    def __init__(self, parent=None):
+        super(wizardPage_create_ondemand, self).__init__(parent)
+        self.setTitle("Create Files On-Demand profile")
+        self.setSubTitle(
+            "Files appear in the folder at once and are downloaded when first opened. "
+            "The profile is stored in ~/.config/<profile name> and runs as a systemd user service."
+        )
+
+        self.lineEdit_profile_name = QLineEdit()
+        self.lineEdit_profile_name.setPlaceholderText("E.g. onedrive-ondemand-work")
+        self.lineEdit_mount = QLineEdit()
+        self.lineEdit_mount.setPlaceholderText("E.g. ~/OneDrive (must be empty or not exist yet)")
+        self.lineEdit_tenant = QLineEdit()
+        self.lineEdit_tenant.setPlaceholderText("Optional, work or school accounts: azure_tenant_id")
+        self.lineEdit_application_id = QLineEdit()
+        self.lineEdit_application_id.setPlaceholderText("Optional, work or school accounts: application_id")
+
+        self.pushButton_browse = QPushButton("Browse")
+        self.pushButton_browse.clicked.connect(self.get_dir_name)
+        self.pushButton_create = QPushButton("Create Files On-Demand profile")
+        self.pushButton_create.clicked.connect(self.create_profile)
+
+        self.label_message = QLabel()
+        self.label_message.setWordWrap(True)
+        self.label_message.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        for line_edit in (self.lineEdit_profile_name, self.lineEdit_mount):
+            line_edit.textChanged.connect(self.validate)
+
+        layout = QGridLayout()
+        layout.addWidget(QLabel("Profile name"), 0, 0)
+        layout.addWidget(self.lineEdit_profile_name, 0, 1, 1, 2)
+        layout.addWidget(QLabel("OneDrive folder"), 1, 0)
+        layout.addWidget(self.lineEdit_mount, 1, 1)
+        layout.addWidget(self.pushButton_browse, 1, 2)
+        layout.addWidget(QLabel("Tenant"), 2, 0)
+        layout.addWidget(self.lineEdit_tenant, 2, 1, 1, 2)
+        layout.addWidget(QLabel("Application ID"), 3, 0)
+        layout.addWidget(self.lineEdit_application_id, 3, 1, 1, 2)
+        layout.addWidget(self.pushButton_create, 4, 0, 1, 3)
+        layout.addWidget(self.label_message, 5, 0, 1, 3)
+        self.setLayout(layout)
+
+        self.process = None
+        self.created = False
+        self.reset()
+
+    def reset(self):
+        self.created = False
+        for widget in (self.lineEdit_profile_name, self.lineEdit_mount, self.lineEdit_tenant, self.lineEdit_application_id, self.pushButton_browse):
+            widget.setEnabled(True)
+        self.lineEdit_profile_name.setText("")
+        self.lineEdit_mount.setText("")
+        self.lineEdit_tenant.setText("")
+        self.lineEdit_application_id.setText("")
+        self.pushButton_create.setText("Create Files On-Demand profile")
+        self.label_message.setText("")
+        self.validate()
+
+    def isComplete(self):
+        return self.created
+
+    def get_dir_name(self):
+        dir_name = QFileDialog.getExistingDirectory(dir=os.path.expanduser("~/"))
+        if dir_name:
+            self.lineEdit_mount.setText(dir_name)
+
+    def validate(self):
+        if self.created:
+            return
+        name = self.lineEdit_profile_name.text().strip()
+        mount = self.lineEdit_mount.text().strip()
+        used_dirs = [global_config[p]["onedrive"]["sync_dir"].strip('"') for p in global_config]
+        error = ondemand_profile.validate_new_profile(name, mount, list(global_config), used_dirs) if name or mount else ""
+        self.label_message.setText(error)
+        self.pushButton_create.setEnabled(bool(name and mount) and not error)
+
+    def create_profile(self):
+        name = self.lineEdit_profile_name.text().strip()
+        mount = self.lineEdit_mount.text().strip()
+        args = ondemand_profile.setup_command(name, mount, self.lineEdit_tenant.text().strip(), self.lineEdit_application_id.text().strip())
+        logging.info(f"[WIZARD] Running {ondemand_profile.SETUP_TOOL} {' '.join(args)}")
+
+        self.pushButton_create.setEnabled(False)
+        self.label_message.setText("Creating profile ...")
+        self.process = QProcess(self)
+        self.process.setProcessChannelMode(QProcess.MergedChannels)
+        self.process.finished.connect(lambda exit_code, _status: self.setup_finished(name, exit_code))
+        self.process.start(ondemand_profile.setup_tool_path() or ondemand_profile.SETUP_TOOL, args)
+
+    def setup_finished(self, profile_name, exit_code):
+        output = bytes(self.process.readAll()).decode(errors="replace").strip()
+        logging.info(f"[WIZARD] {ondemand_profile.SETUP_TOOL} exited with {exit_code}: {output}")
+        if exit_code != 0:
+            self.label_message.setText(f"Creating the profile failed:\n{output}")
+            self.validate()
+            return
+
+        entry = ondemand_profile.add_gui_profile(PROFILES_FILE, profile_name)
+        new_profile = dict(entry)
+        new_profile["onedrive"] = {}
+        new_profile["onedrive"].update(read_config(DIR_PATH + "/resources/default_config")._sections["onedrive"])
+        new_profile["onedrive"].update(read_config(entry["config_file"])._sections["onedrive"])
+        global_config[profile_name] = copy.deepcopy(new_profile)
+        temp_global_config[profile_name] = copy.deepcopy(new_profile)
+
+        self.created = True
+        for widget in (self.lineEdit_profile_name, self.lineEdit_mount, self.lineEdit_tenant, self.lineEdit_application_id, self.pushButton_browse):
+            widget.setEnabled(False)
+        self.pushButton_create.setText("Done")
+        self.label_message.setText(f"Profile {profile_name} created in {ondemand_profile.profile_dir(profile_name)}.")
+
+        wizard_instance = self.wizard()
+        if wizard_instance:
+            wizard_instance.add_profile_signal.emit(profile_name)
+        self.completeChanged.emit()
+        self.offer_next_steps(profile_name, entry["systemd_unit"])
+
+    def offer_next_steps(self, profile_name, unit):
+        confdir = ondemand_profile.profile_dir(profile_name)
+        box = QMessageBox(self)
+        box.setWindowTitle("Files On-Demand profile created")
+        box.setIcon(QMessageBox.Information)
+        box.setTextFormat(Qt.RichText)
+        box.setText(
+            f"<p>Profile <b>{profile_name}</b> is ready. Before the service can run it:</p>"
+            "<ol><li>Sign in to OneDrive.</li>"
+            "<li>Run the first synchronisation once in a terminal, and stop it with Ctrl+C when it has completed:<br>"
+            f"<tt>onedrive --confdir={confdir} --monitor --on-demand --resync --resync-auth</tt></li>"
+            f"<li>Enable the service <b>{unit}</b>; it then runs in the background and at every login.</li></ol>"
+            "<p>OneDriveGUI shows the status of the service once it runs; it does not start its own client for this profile.</p>"
+        )
+        box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        sign_in = box.addButton("Sign in now", QMessageBox.ActionRole)
+        enable = box.addButton("Enable service now", QMessageBox.ActionRole)
+        box.addButton("Later", QMessageBox.RejectRole)
+        box.exec()
+
+        if box.clickedButton() is sign_in:
+            import main_window
+
+            main_window.main_window_instance.show_external_login(profile_name)
+        elif box.clickedButton() is enable:
+            self.enable_service(unit)
+
+    def enable_service(self, unit):
+        logging.info(f"[WIZARD] Enabling {unit}")
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.finished.connect(
+            lambda exit_code, _status: self.label_message.setText(
+                f"{unit} enabled and started." if exit_code == 0 else f"Enabling {unit} failed: {bytes(process.readAll()).decode(errors='replace')}"
+            )
+        )
+        # daemon-reload first, as in README.ondemand.md, so a freshly installed unit file is seen.
+        process.start("sh", ["-c", f"systemctl --user daemon-reload && systemctl --user enable --now '{unit}'"])
 
 
 class wizardPage_finish(QWizardPage):
