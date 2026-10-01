@@ -89,6 +89,8 @@ class SetupWizard(QWizard):
             import_page.lineEdit_profile_name.setEnabled(True)
             import_page.lineEdit_config_path.setEnabled(True)
             import_page.pushButton_browse.setEnabled(True)
+            import_page.pushButton_select_folder.setEnabled(True)
+            import_page.label_hint.setText("")
 
         # Reset the create/import selection page
         selection_page = self.page(3)
@@ -773,6 +775,14 @@ class wizardPage_import(QWizardPage):
         self.pushButton_browse.setText("Browse")
         self.pushButton_browse.clicked.connect(self.get_config_name)
 
+        self.pushButton_select_folder = QPushButton()
+        self.pushButton_select_folder.setText("Select folder")
+        self.pushButton_select_folder.setToolTip("Select the profile folder (the --confdir) that contains the config file")
+        self.pushButton_select_folder.clicked.connect(self.get_config_dir)
+
+        self.label_hint = QLabel()
+        self.label_hint.setWordWrap(True)
+
         self.pushButton_import = QPushButton()
         self.pushButton_import.setText("Import")
         self.pushButton_import.setEnabled(False)
@@ -784,8 +794,23 @@ class wizardPage_import(QWizardPage):
         layout.addWidget(self.lineEdit_profile_name, 0, 1)
         layout.addWidget(self.lineEdit_config_path, 1, 1)
         layout.addWidget(self.pushButton_browse, 1, 2)
-        layout.addWidget(self.pushButton_import, 2, 0, 2, 3)
+        layout.addWidget(self.pushButton_select_folder, 1, 3)
+        layout.addWidget(self.label_hint, 2, 1, 1, 3)
+        layout.addWidget(self.pushButton_import, 3, 0, 2, 4)
         self.setLayout(layout)
+
+    def resolved_config_path(self):
+        """
+        The config file to import: the path itself when it ends in /config (upstream), or
+        <folder>/config when a profile folder was given. None if there is no such file.
+        """
+        text = self.lineEdit_config_path.text().strip()
+        path = os.path.expanduser(text)
+        if re.search(r"/config$", text) and os.path.exists(path):
+            return path
+        if text and os.path.isdir(path) and os.path.isfile(os.path.join(path, "config")):
+            return os.path.join(path.rstrip("/"), "config")
+        return None
 
     def isComplete(self):
         # Enable 'Next' button only when profile config was successfully imported
@@ -797,21 +822,25 @@ class wizardPage_import(QWizardPage):
         # Enable 'Import' button only when profile name and path to config file are valid.
         profile_name_filled = self.lineEdit_profile_name.text().strip() != ""
 
-        config_specified = re.search(r"/config$", self.lineEdit_config_path.text().strip()) != None
-        config_path = os.path.expanduser(self.lineEdit_config_path.text().strip())
-        config_exists = os.path.exists(config_path)
+        config_path_text = self.lineEdit_config_path.text().strip()
+        config_found = self.resolved_config_path() is not None
         unique_profile_name = self.lineEdit_profile_name.text() not in global_config.keys()
 
-        if all([profile_name_filled, config_specified, config_exists, unique_profile_name]):
+        hint = ""
+        if not unique_profile_name:
+            hint = f"A profile named '{self.lineEdit_profile_name.text()}' already exists."
+        elif config_path_text and not config_found:
+            hint = "No config file found. Enter the path of a 'config' file or of the profile folder that contains it."
+        self.label_hint.setText(hint)
+
+        if all([profile_name_filled, config_found, unique_profile_name]):
             self.pushButton_import.setEnabled(True)
         else:
             self.pushButton_import.setEnabled(False)
             if not unique_profile_name:
                 logging.warning(f"[GUI] Profile name {self.lineEdit_profile_name.text()} is already used!")
-            if not config_specified:
-                logging.warning(f"[GUI] Path to config file not specified.")
-            if not config_exists:
-                logging.warning(f"[GUI] Specified config file '{self.lineEdit_config_path.text().strip()}' not found!")
+            if not config_found:
+                logging.warning(f"[GUI] Config file '{config_path_text}' not found!")
 
     def get_config_name(self):
         self.file_dialog = QFileDialog.getOpenFileName(self, dir=os.path.expanduser("~/.config/onedrive"))
@@ -820,6 +849,11 @@ class wizardPage_import(QWizardPage):
 
         logging.info(file_name)
         self.lineEdit_config_path.setText(file_name)
+
+    def get_config_dir(self):
+        dir_name = QFileDialog.getExistingDirectory(self, dir=os.path.expanduser("~/.config"))
+        if dir_name:
+            self.lineEdit_config_path.setText(dir_name)
 
     def import_profile(self):
         """
@@ -832,7 +866,7 @@ class wizardPage_import(QWizardPage):
         # self.profile_settings_window.stop_unsaved_changes_timer()
 
         profile_name = self.lineEdit_profile_name.text().strip()
-        config_path = os.path.expanduser(self.lineEdit_config_path.text())
+        config_path = self.resolved_config_path()
 
         # Load all default values.
         _default_od_config = read_config(DIR_PATH + "/resources/default_config")
@@ -918,6 +952,7 @@ class wizardPage_import(QWizardPage):
         self.lineEdit_profile_name.setDisabled(True)
         self.lineEdit_config_path.setDisabled(True)
         self.pushButton_browse.setDisabled(True)
+        self.pushButton_select_folder.setDisabled(True)
         self.completeChanged.emit()
 
 

@@ -187,7 +187,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.attached_transfer_items = {}  # profile name -> {path: (list widget, direction, total)}
         self.tray_menu_signature = None
         self.dbus = OneDriveDBus(self)
-        set_attached_check(lambda profile_name: profile_name in self.attached)
+        set_attached_check(self.profile_has_dbus_client)
+        self.matched_config_files = None
         if self.dbus.start():
             for signal in (self.dbus.instance_added, self.dbus.instance_removed):
                 signal.connect(self.match_dbus_instances)
@@ -565,6 +566,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             if profile_name not in self.profile_status_pages:
                 logging.info(f"Profile {profile_name} found in global_config but not in UI, adding it now")
                 self.add_profile(profile_name)
+
+        self.match_dbus_instances_if_profiles_changed()
+
+        for profile_name in global_config:
 
             profile_status_page = self.profile_status_pages[profile_name]
 
@@ -1318,6 +1323,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.stackedLayout.update()
         self.verticalLayout_2.update()
 
+        # A client for the new profile may already be running (e.g. a systemd unit).
+        self.match_dbus_instances()
+
         # Process events to ensure UI updates immediately
         from PySide6.QtCore import QCoreApplication
 
@@ -1356,6 +1364,12 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         else:
             logging.info(f"[MAIN_WINDOW] No worker found for profile '{old_name}'.")
 
+        # 4. Re-match D-Bus clients under the new name; move an open status window along.
+        if old_name in self.status_windows:
+            self.status_windows[new_name] = self.status_windows.pop(old_name)
+            self.status_windows[new_name].profile_name = new_name
+        self.match_dbus_instances()
+
         # Force update the UI
         self.comboBox.update()
         self.update()
@@ -1381,10 +1395,26 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     # --- Clients attached over D-Bus ---------------------------------------------
 
+    def profile_has_dbus_client(self, profile_name):
+        """True if a client for this profile's confdir is on the bus, even before the profile was matched."""
+        if profile_name in self.attached:
+            return True
+        if not self.dbus or profile_name not in global_config:
+            return False
+        instances = {bus: instance.props for bus, instance in self.dbus.instances.items()}
+        return bool(match_profiles({profile_name: profile_confdir(global_config[profile_name])}, instances))
+
+    def match_dbus_instances_if_profiles_changed(self):
+        """Re-match when a profile was added, renamed or got another config file."""
+        config_files = {profile: global_config[profile].get("config_file") for profile in global_config}
+        if config_files != self.matched_config_files:
+            self.match_dbus_instances()
+
     def match_dbus_instances(self, _bus_name=None):
         """Recompute which profiles have a client on the bus (by ConfigDir)."""
         if not self.dbus:
             return
+        self.matched_config_files = {profile: global_config[profile].get("config_file") for profile in global_config}
         confdirs = {profile: profile_confdir(global_config[profile]) for profile in global_config}
         attached = match_profiles(confdirs, {bus: instance.props for bus, instance in self.dbus.instances.items()})
 
@@ -1402,6 +1432,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         for profile in attached:
             self.update_attached_page(profile)
             self.update_attached_transfers(profile)
+            if profile in self.profile_status_pages and profile not in workers:
+                self.update_attached_controls(profile, self.pixmap_running())
 
         self.refresh_tray_menu()
         self.update_tray_icon()
@@ -1484,6 +1516,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             widget.set_label_1("Queued" if state == "queued" else active_labels.get(direction, direction))
             widget.set_label_2(f"{humanize_file_size(done)} of {humanize_file_size(total)}" if total else "")
             widget.set_progress(int(done * 100 / total) if total else 0)
+
+    def pixmap_running(self):
+        return QPixmap(DIR_PATH + "/resources/images/icons8-green-circle-48.png").scaled(24, 24, Qt.KeepAspectRatio)
 
     def update_attached_controls(self, profile_name, pixmap_running):
         """Status light and start/stop button of a profile whose client runs outside the GUI."""

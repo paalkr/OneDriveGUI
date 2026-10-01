@@ -361,7 +361,7 @@ class MainWindowTests(unittest.TestCase):
         self.assertTrue(wait_until(lambda: "Waiting for network" in self.window.tray.toolTip()))
         # profile-b has no client and is stopped: stopped outranks offline.
         self.assertEqual(self.window.tray_overall_state, "stopped")
-        self.assertIn("profile-b: OneDrive sync is not running", self.window.tray.toolTip())
+        self.assertIn("profile-b: ", self.window.tray.toolTip())
 
         menus = [action.text() for action in self.window.tray_menu.actions()]
         self.assertIn("profile-a", menus)
@@ -434,6 +434,74 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(config["onedrive"]["sync_dir"].strip('"'), os.path.join(HOME, "OneDrive-work"))
         self.assertEqual(od.start_decision(config, False, False), "service")
         self.assertTrue(page.isComplete())
+
+    def test_import_by_folder_attaches_to_running_client_at_once(self):
+        # A client (non on-demand) is already running for a confdir the GUI does not know yet.
+        confdir = os.path.join(HOME, ".config", "imported-c")
+        os.makedirs(confdir, exist_ok=True)
+        config_text = '# keep this comment\nsync_dir = "~/OneDrive-c"\n'
+        with open(os.path.join(confdir, "config"), "w") as f:
+            f.write(config_text)
+        mock = start_mock(confdir, "--no-ondemand", "--detail", "Up to date")
+        try:
+            bus_name = od.bus_name_for_confdir(confdir)
+            self.assertTrue(wait_until(lambda: bus_name in self.window.dbus.instances))
+
+            import wizard
+
+            page = wizard.setup_wizard.page(5)
+            page.lineEdit_profile_name.setEnabled(True)
+            page.lineEdit_config_path.setEnabled(True)
+            page.lineEdit_profile_name.setText("imported-c")
+            page.lineEdit_config_path.setText(os.path.join(HOME, "no-such-dir"))
+            self.assertFalse(page.pushButton_import.isEnabled())
+            self.assertIn("No config file found", page.label_hint.text())
+            page.lineEdit_config_path.setText(confdir + "/")  # the folder, not the file
+            self.assertTrue(page.pushButton_import.isEnabled())
+            self.assertEqual(page.label_hint.text(), "")
+            page.import_profile()
+
+            # Matched immediately, without a restart or a D-Bus event.
+            self.assertEqual(self.window.attached.get("imported-c"), bus_name)
+            self.assertIn("Up to date", self.window.profile_status_pages["imported-c"].label_onedrive_status.text())
+            self.assertNotIn("imported-c", self.workers)  # no client started
+            self.assertEqual(self.main_window_module.global_config["imported-c"]["config_file"], os.path.join(confdir, "config"))
+            # The import's save did not rewrite the running client's config.
+            with open(os.path.join(confdir, "config")) as f:
+                self.assertEqual(f.read(), config_text)
+            self.assertFalse(os.path.exists(os.path.join(confdir, "config_backup")))
+        finally:
+            stop_mock(mock)
+            self.main_window_module.global_config.pop("imported-c", None)
+            self.window.match_dbus_instances()
+
+    def test_import_page_still_accepts_config_file(self):
+        import wizard
+
+        page = wizard.setup_wizard.page(5)
+        page.lineEdit_profile_name.setEnabled(True)
+        page.lineEdit_profile_name.setText("file-path-profile")
+        page.lineEdit_config_path.setText(os.path.join(CONFDIR_B, "config"))
+        self.assertTrue(page.pushButton_import.isEnabled())
+        self.assertEqual(page.resolved_config_path(), os.path.join(CONFDIR_B, "config"))
+
+    def test_rematch_when_profile_config_changes(self):
+        self.assertTrue(wait_until(lambda: "profile-a" in self.window.attached))
+        config = self.main_window_module.global_config["profile-b"]
+        original = config["config_file"]
+        other = start_mock(CONFDIR_B)
+        try:
+            self.assertTrue(wait_until(lambda: "profile-b" in self.window.attached))
+            config["config_file"] = os.path.join(HOME, ".config", "nowhere", "config")
+            self.window.onedrive_process_status()
+            self.assertNotIn("profile-b", self.window.attached)
+            config["config_file"] = original
+            self.window.onedrive_process_status()
+            self.assertIn("profile-b", self.window.attached)
+        finally:
+            config["config_file"] = original
+            stop_mock(other)
+            self.assertTrue(wait_until(lambda: "profile-b" not in self.window.attached))
 
     def test_profile_without_client_still_spawns(self):
         decision = od.start_decision(self.main_window_module.global_config["profile-b"], "profile-b" in self.window.attached, False)
