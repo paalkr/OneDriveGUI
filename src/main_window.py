@@ -55,7 +55,7 @@ from ondemand_dbus import (
     start_decision,
     tray_state,
 )
-from ondemand_mode import ACTIVE_STATES, UnitStates, mode_text, profile_mode
+from ondemand_mode import ACTIVE_STATES, StartRefusals, UnitStates, mode_text, profile_mode
 from ondemand_ui import STATE_LABELS, OnDemandStatusWindow, file_type_icon, status_text, themed_icon, tray_icon
 from datetime import datetime
 from gui_settings_window import gui_settings_window
@@ -195,6 +195,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.attached = {}  # profile name -> bus name
         self.unit_states = UnitStates(self)
         self.unit_states.changed.connect(lambda _unit: self.refresh_mode_indicators())
+        self.start_refusals = StartRefusals(self)
+        self.start_refusals.changed.connect(self.on_start_refusal_changed)
         self.mode_texts = {}
         self.service_actions = set()  # profiles with a start/stop/restart/rebuild in flight
         self.resync_runners = {}
@@ -1668,11 +1670,39 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         running = mode["active"] in ACTIVE_STATES
         page.pushButton_service.setText("Stop background service" if running else "Start background service")
         page.pushButton_service.setToolTip(f"{unit}: {mode['active']}")
+        if profile_name in self.attached:
+            self.start_refusals.clear(unit)
+        elif profile_name not in workers and profile_name not in self.service_actions and mode["active"] in ("failed", "activating"):
+            # Failing or restarting without a client on the bus: the client may refuse to start.
+            self.start_refusals.check(unit)
+        refusal = self.start_refusals.get(unit)
         if profile_name not in self.attached and profile_name not in workers and profile_name not in self.service_actions:
-            if mode["active"] in ("inactive", "failed", "deactivating"):
+            if refusal:
+                page.label_onedrive_status.setText("Background service cannot start: " + (refusal if len(refusal) <= 160 else refusal[:157] + "..."))
+                page.label_onedrive_status.setToolTip(refusal)
+            elif mode["active"] in ("inactive", "failed", "deactivating"):
                 page.label_onedrive_status.setText("Stopped (background service)" if mode["active"] != "failed" else f"Background service failed ({unit})")
             elif mode["active"] in ACTIVE_STATES:
                 page.label_onedrive_status.setText("Starting background service ...")
+
+    def start_refusal(self, profile_name):
+        """The client's latest start refusal for a service profile without a running client, or ""."""
+        if profile_name in self.attached or profile_name not in global_config:
+            return ""
+        return self.start_refusals.get(self.service_unit(profile_name))
+
+    def on_start_refusal_changed(self, unit):
+        for profile in global_config:
+            if self.service_unit(profile) == unit:
+                text = self.start_refusals.get(unit)
+                if text:
+                    logging.warning(f"[{profile}] {unit} refuses to start: {text}")
+                    if self.tray:
+                        self.tray.showMessage("OneDriveGUI", f"{profile}: the background service cannot start. {text}", QSystemTrayIcon.Warning, 10000)
+                else:
+                    self.profile_status_pages[profile].label_onedrive_status.setToolTip("")
+        self.mode_texts = {}
+        self.refresh_mode_indicators()
 
     def service_unit(self, profile_name):
         return self.profile_mode(profile_name)["unit"] if profile_name in global_config else ""
@@ -1796,9 +1826,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         ondemand = self.profile_mode(profile_name)["ondemand"]
         if ondemand:
             warning = (
-                f"Stopping the background service unmounts <b>{mount}</b>. Files in it are unavailable until the "
-                "service is started again, and apps with open files from it may lose unsaved changes. "
-                "Pending uploads continue at the next start."
+                f"Stopping the background service unmounts <b>{mount}</b>. Files you have downloaded stay in the "
+                "folder as ordinary files; online-only files are unavailable until the service is started again. "
+                "Apps with open files from it may lose unsaved changes. "
+                "Pending uploads continue at the next start, and changes made to downloaded files meanwhile are uploaded then."
             )
         else:
             warning = (
@@ -1918,7 +1949,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if profile_name not in self.status_windows:
             # Parented to the main window (no taskbar entry of its own), still a separate window.
             self.status_windows[profile_name] = OnDemandStatusWindow(
-                self.dbus, profile_name, self.attached.get, parent=self, mode_lookup=self.profile_mode_text
+                self.dbus, profile_name, self.attached.get, parent=self, mode_lookup=self.profile_mode_text, refusal_lookup=self.start_refusal
             )
             self.status_windows[profile_name].setWindowFlag(Qt.Window, True)
             self.status_windows[profile_name].setAttribute(Qt.WA_QuitOnClose, False)

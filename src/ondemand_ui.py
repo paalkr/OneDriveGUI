@@ -112,9 +112,10 @@ def describe_last_sync(unix_time):
 class OnDemandStatusWindow(QWidget):
     """Transfers and issues of one profile attached over D-Bus."""
 
-    def __init__(self, dbus, profile_name, bus_name_lookup, parent=None, mode_lookup=None):
+    def __init__(self, dbus, profile_name, bus_name_lookup, parent=None, mode_lookup=None, refusal_lookup=None):
         super().__init__(parent)
         self.mode_lookup = mode_lookup
+        self.refusal_lookup = refusal_lookup
         self.dbus = dbus
         self.profile_name = profile_name
         self.bus_name_lookup = bus_name_lookup
@@ -225,7 +226,9 @@ class OnDemandStatusWindow(QWidget):
         instance = self.instance()
         if instance is None:
             self.label_state.setText("The client for this profile is not running.")
-            self.label_details.setText("")
+            refusal = self.refusal_lookup(self.profile_name) if self.refusal_lookup else ""
+            self.label_details.setText(f"It refuses to start: {refusal}" if refusal else "")
+            self.label_details.setWordWrap(True)
             for button in (self.button_sync_now, self.button_pause, self.button_open_sync_dir):
                 button.setEnabled(False)
             self.populate_transfers([])

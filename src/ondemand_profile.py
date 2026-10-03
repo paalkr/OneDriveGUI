@@ -78,5 +78,5 @@ def validate_new_profile(profile_name, mount, used_profile_names, used_sync_dirs
     if os.path.ismount(expanded):
         return "This folder is already a mount point (another client may be using it)."
     if os.path.isdir(expanded) and os.listdir(expanded):
-        return "The folder must be empty or not exist yet, because the mount hides what is in it."
+        return "The folder must be empty or not exist yet (onedrive-ondemand-setup requires this)."
     return ""

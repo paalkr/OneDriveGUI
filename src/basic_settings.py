@@ -177,7 +177,7 @@ class BasicSettingsPage(QWidget):
             self.label_folder_note.setText(
                 f"Changing the folder needs a rebuild after saving. {rebuild}"
                 if self.settings_page.is_resync_key("sync_dir")
-                else "Changing the folder moves where OneDrive appears when the service restarts (you are asked before saving)."
+                else "Changing the folder moves it, with the downloaded files, when the service restarts. The new folder must be empty or absent and on the same filesystem, otherwise the service does not start (you are asked before saving)."
             )
             self.label_folders_note.setText(f"Changing the folder selection needs a rebuild after saving. {rebuild}")
         elif mode["ondemand"]:
@@ -187,7 +187,7 @@ class BasicSettingsPage(QWidget):
                     "(the commands are shown when you save). Downloaded files are kept."
                 )
             else:
-                self.label_folder_note.setText("Changing the folder moves where OneDrive appears when the service restarts (you are asked before saving).")
+                self.label_folder_note.setText("Changing the folder moves it, with the downloaded files, when the service restarts. The new folder must be empty or absent and on the same filesystem, otherwise the service does not start (you are asked before saving).")
             self.label_folders_note.setText(
                 "Changing the folder selection needs a manual step after saving: rebuilding the client's local "
                 "index (the commands are shown when you save). Downloaded files are kept."
@@ -226,7 +226,10 @@ class BasicSettingsPage(QWidget):
             self.pushButton_service_start.setEnabled(not running and not self.service_busy)
             self.pushButton_service_stop.setEnabled(running and not self.service_busy)
             if not self.service_result:
-                self.label_service.setText(f"{mode['unit']}: {mode['active']}")
+                refusal = window.start_refusal(self.profile) if window else ""
+                self.label_service.setText(
+                    f"{mode['unit']}: {mode['active']}" + (f"\nThe client refuses to start: {refusal}" if refusal else "")
+                )
 
         can_pause = instance is not None and instance.has_capability("pause")
         self.pushButton_pause.setVisible(can_pause)

@@ -193,6 +193,47 @@ class PureLogicTests(unittest.TestCase):
         self.assertEqual(resync_unit_for_profile("onedrive-ondemand"), "onedrive-ondemand-resync@onedrive-ondemand.service")
         self.assertEqual(resync_unit_for_profile("work"), "onedrive-ondemand-resync@work.service")
 
+    def test_parse_start_refusal(self):
+        from ondemand_mode import parse_start_refusal
+
+        journal = "\n".join(
+            [
+                "Starting onedrive-ondemand.service - OneDrive Files On-Demand...",
+                "ERROR: 'sync_dir' (/home/u/OneDrive) is already mounted by a running on-demand client. Stop that client first.",
+                "onedrive-ondemand.service: Failed with result 'exit-code'.",
+                "Starting onedrive-ondemand.service - OneDrive Files On-Demand...",
+                "Reading configuration file: /home/u/.config/onedrive-ondemand/config",
+                "ERROR: The on-demand files are in /home/u/old, but 'sync_dir' (/home/u/OneDrive) already contains files. Move them yourself (never overwrite), or re-run with --resync.",
+            ]
+        )
+        self.assertTrue(parse_start_refusal(journal).startswith("The on-demand files are in /home/u/old"))
+        # Only the latest start attempt counts.
+        self.assertEqual(parse_start_refusal(journal + "\nStarting onedrive-ondemand.service - x\nERROR: some other error"), "")
+        self.assertIn("does not respond", parse_start_refusal("ERROR: 'sync_dir' (/x) is mounted by an on-demand client that does not respond. Stop it"))
+        self.assertIn("same filesystem", parse_start_refusal("ERROR: Unable to move the on-demand files from /a to 'sync_dir' (/b): EXDEV. Both must be on the same filesystem; move them yourself"))
+
+    def test_mount_move_problem(self):
+        from unittest import mock
+
+        base = tempfile.mkdtemp(dir=HOME)
+        old = os.path.join(base, "OneDrive")
+        os.mkdir(old)
+        self.assertEqual(od.mount_move_problem(old, os.path.join(base, "new", "OneDrive")), "")
+        full = os.path.join(base, "full")
+        os.mkdir(full)
+        open(os.path.join(full, "f"), "w").close()
+        self.assertIn("already contains files", od.mount_move_problem(old, full))
+        real_stat = os.stat
+
+        def other_device(path, *args, **kwargs):
+            result = real_stat(path, *args, **kwargs)
+            if os.path.realpath(path) == base:  # the old folder's parent
+                return os.stat_result((result.st_mode, result.st_ino, result.st_dev + 1) + tuple(result)[3:])
+            return result
+
+        with mock.patch.object(od.os, "stat", side_effect=other_device):
+            self.assertIn("not on the same filesystem", od.mount_move_problem(old, os.path.join(HOME, "elsewhere")))
+
     def test_weburl_xattr_read(self):
         with tempfile.NamedTemporaryFile(dir=HOME) as f:
             try:
@@ -860,7 +901,7 @@ class SettingsPageTests(unittest.TestCase):
             page.save_clicked()
         # On-demand: moving the mount needs no resync (OPTIONS.md since d2f488b), only a restart.
         question.assert_called_once()
-        self.assertIn("is unmounted and the files appear at <b>~/Elsewhere</b> after the service restarts", question.call_args[0][2])
+        self.assertIn("is moved to <b>~/Elsewhere</b>, with the files you have downloaded", question.call_args[0][2])
         page.discard_changes()
 
     def test_basic_notes_say_the_rebuild_is_a_manual_step(self):
@@ -1023,6 +1064,7 @@ class ServiceControlTests(unittest.TestCase):
             self.assertIn(f"unmounts <b>{MOUNT_A}</b>", warning)
             self.assertIn("lose unsaved changes", warning)
             self.assertIn("Pending uploads continue at the next start", warning)
+            self.assertIn("Files you have downloaded stay in the folder as ordinary files", warning)
             self.assertEqual(self.systemctl_log().count("--user stop"), before.count("--user stop"))
 
             results = self.results()
@@ -1075,6 +1117,40 @@ class ServiceControlTests(unittest.TestCase):
                 self.assertIn(f"--user -u {self.UNIT} -n 20 --no-pager", f.read())
         finally:
             os.remove(os.path.join(HOME, "systemd", self.UNIT + ".fail"))
+
+    def test_start_refusal_is_shown(self):
+        os.makedirs(os.path.join(HOME, "journal"), exist_ok=True)
+        refusal = (
+            f"The on-demand files are in {HOME}/old, but 'sync_dir' ({MOUNT_A}) already contains files. "
+            "Move them yourself (never overwrite), or re-run with --resync."
+        )
+        with open(os.path.join(HOME, "journal", self.UNIT), "w") as f:
+            f.write(f"Starting {self.UNIT} - OneDrive Files On-Demand...\nReading configuration file\nERROR: {refusal}\n")
+        self.set_unit_state("failed enabled")
+        self.window.start_refusals.checked.clear()
+        page = self.window.profile_status_pages["profile-a"]
+        try:
+            self.assertTrue(wait_until(lambda: self.window.onedrive_process_status() or page.label_onedrive_status.text().startswith("Background service cannot start:"), timeout=10))
+            self.assertIn("already contains files", page.label_onedrive_status.text())
+            self.assertEqual(page.label_onedrive_status.toolTip(), refusal)
+            self.window.show_status_window("profile-a")
+            self.assertIn(f"It refuses to start: {refusal}", self.window.status_windows["profile-a"].label_details.text())
+            self.window.status_windows["profile-a"].close()
+            basic = self.basic_page()
+            basic.service_result = ""
+            basic.refresh()
+            self.assertIn("The client refuses to start", basic.label_service.text())
+
+            # Once the client runs (on the bus), the refusal is gone.
+            self.set_unit_state("active enabled")
+            mock_client = start_mock(CONFDIR_A, "--syncdir", MOUNT_A)
+            try:
+                self.assertTrue(wait_until(lambda: "profile-a" in self.window.attached))
+                self.assertTrue(wait_until(lambda: self.window.onedrive_process_status() or self.window.start_refusal("profile-a") == "" and not self.window.start_refusals.get(self.UNIT)))
+            finally:
+                stop_mock(mock_client)
+        finally:
+            os.remove(os.path.join(HOME, "journal", self.UNIT))
 
     def test_stop_warning_for_normal_mode_unit(self):
         from unittest import mock
@@ -1147,7 +1223,7 @@ class ResyncWordingTests(unittest.TestCase):
         page.options_table = dict(page.options_table)
         page.options_table["sync_dir"] = dict(page.options_table.get("sync_dir", {"class": "relevant-ondemand", "notes": ""}), resync=False)
         page.basic_page.refresh()
-        self.assertIn("moves where OneDrive appears", page.basic_page.label_folder_note.text())
+        self.assertIn("moves it, with the downloaded files, when the service restarts", page.basic_page.label_folder_note.text())
         self.assertTrue(wait_until(lambda: self.window.profile_mode("wording-move")["active"] == "active"), self.window.profile_mode("wording-move"))
 
         old = profile["onedrive"]["sync_dir"].strip('"')
@@ -1159,7 +1235,7 @@ class ResyncWordingTests(unittest.TestCase):
             page.save_clicked()
         self.assertEqual(question.call_count, 1)  # no resync dialog, only the move
         text = question.call_args[0][2]
-        self.assertIn(f"The folder <b>{old}</b> is unmounted and the files appear at <b>{new}</b> after the service restarts", text)
+        self.assertIn(f"the folder <b>{old}</b> is moved to <b>{new}</b>, with the files you have downloaded", text)
         self.assertIn(f"restart <b>{unit}</b>", text)
         with open(profile["config_file"]) as f:
             self.assertIn(f'sync_dir = "{new}"', f.read())
@@ -1167,6 +1243,24 @@ class ResyncWordingTests(unittest.TestCase):
         self.assertEqual(results[0][:3], ("wording-move", "restart", True))
         with open(os.path.join(HOME, "systemctl.log")) as f:
             self.assertIn(f"--user restart {unit}", f.read())
+
+    def test_mount_move_to_non_empty_folder_warns_and_defaults_to_no(self):
+        from unittest import mock
+
+        page, profile = self.page_for("wording-full", ondemand=True)
+        page.options_table = {"sync_dir": {"class": "relevant-ondemand", "resync": False, "notes": ""}}
+        full = os.path.join(HOME, "full-target")
+        os.makedirs(full, exist_ok=True)
+        open(os.path.join(full, "existing.txt"), "w").close()
+        page.temp_profile_config["onedrive"]["sync_dir"] = f'"{full}"'
+        with mock.patch.object(self.psw.QMessageBox, "question", return_value=self.psw.QMessageBox.No) as question:
+            page.save_clicked()
+        text = question.call_args[0][2]
+        self.assertIn("already contains files", text)
+        self.assertIn("would refuse to start", text)
+        self.assertEqual(question.call_args.kwargs["defaultButton"], self.psw.QMessageBox.No)
+        with open(profile["config_file"]) as f:
+            self.assertNotIn(full, f.read())
 
     def test_mount_move_still_resync_when_table_says_so(self):
         from unittest import mock

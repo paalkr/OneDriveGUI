@@ -135,6 +135,18 @@ Stop asks first (on-demand: the mount goes away and apps with open files may los
 normal mode: syncing stops). A stopped unit shows "Stopped (background service)"; after a start
 the client re-attaches over D-Bus. Quitting the GUI never stops a unit.
 
+**Physical sync_dir layout** (client iteration 5): hydrated files live in the physical `sync_dir`
+under the mount; there is no backing directory any more (`on_demand_backing_dir` is "ignored" in
+the option table). Texts say that downloaded files stay in the folder while the service is
+stopped, and that changing `sync_dir` moves the folder when the new one is empty or absent and on
+the same filesystem; the GUI checks both before saving (`mount_move_problem`). When a service
+profile has no client on the bus and its unit is failing or restarting, the GUI reads the unit's
+journal (`journalctl --user -u <unit> -o cat`, at most every 15 s) for the client's start refusals
+("already mounted by a running on-demand client", "does not respond", "already contains files",
+"same filesystem", ...) and shows the latest one on the main page, in the status window, on the
+Basic page and as a tray message. The GUI shows no local disk usage: that would need the client
+(the physical directory is hidden under the mount, and `du` on the mount counts online-only files).
+
 **Mode indicators** (`src/ondemand_mode.py`): "Files On-Demand", and "Runs as background service
 (systemd)", "Started by OneDriveGUI" or "Started outside OneDriveGUI", plus the unit and its
 ActiveState (cached `systemctl --user show`, refreshed every 5 s). Shown on the profile's main

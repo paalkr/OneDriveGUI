@@ -85,7 +85,11 @@ def match_profiles(profile_confdirs, instances):
 
 
 def is_ondemand_confdir(confdir):
-    """True if the client has run this confdir in on-demand mode (it leaves its backing store and a DB marker)."""
+    """
+    True if the client has run this confdir in on-demand mode: it leaves the database marker
+    items.sqlite3.ondemand. <confdir>/ondemand is the backing directory of the previous layout
+    (before hydrated files moved into the physical sync_dir); still checked for older profiles.
+    """
     return os.path.isdir(os.path.join(confdir, "ondemand")) or os.path.exists(os.path.join(confdir, "items.sqlite3.ondemand"))
 
 
@@ -111,7 +115,7 @@ def start_decision(profile_config, attached, gui_owns_worker):
     'attach':  a client started elsewhere (e.g. systemd) is on the bus; use it, never spawn a second one.
     'service': Files On-Demand profile that is not running; start its systemd user unit. The GUI never
                spawns `onedrive --monitor` for such a profile: without --on-demand the client would
-               treat the (unmounted, empty) mount folder as the sync folder.
+               sync the physical sync_dir in normal mode, where online-only files are missing.
     'spawn':   upstream behaviour, the GUI starts `onedrive --monitor` itself.
     """
     if gui_owns_worker:
@@ -171,6 +175,27 @@ def systemd_unit_for_profile(profile_dir_name):
 def unwrap_variants(props):
     """jeepney returns a{sv} as {name: (signature, value)}."""
     return {name: value[1] if isinstance(value, tuple) and len(value) == 2 else value for name, value in props.items()}
+
+
+def mount_move_problem(old_sync_dir, new_sync_dir):
+    """
+    Why the client would refuse to move an on-demand sync_dir from old to new at its next start, or "".
+    It moves the physical folder with one rename(): same filesystem, target absent or empty. The old
+    folder is the mountpoint while the client runs, so its filesystem is taken from its parent.
+    """
+    old = os.path.realpath(os.path.expanduser(old_sync_dir))
+    new = os.path.realpath(os.path.expanduser(new_sync_dir))
+    if os.path.isdir(new) and os.listdir(new):
+        return f"{new} already contains files"
+    existing = new
+    while not os.path.exists(existing):
+        existing = os.path.dirname(existing)
+    try:
+        if os.stat(existing).st_dev != os.stat(os.path.dirname(old)).st_dev:
+            return f"{new} is not on the same filesystem as {old}"
+    except OSError as e:
+        return f"cannot check {new}: {e.strerror}"
+    return ""
 
 
 def read_weburl(path):

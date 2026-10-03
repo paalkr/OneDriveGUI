@@ -145,6 +145,71 @@ class UnitStates(QObject):
         process.start(systemctl(), ["--user", "enable" if enabled else "disable", unit])
 
 
+# Messages with which the on-demand client refuses to start (main.d prepareOnDemandPhysicalSyncDir).
+START_REFUSAL_PATTERNS = (
+    "is already mounted by a running on-demand client",
+    "is mounted by an on-demand client that does not respond",
+    "already contains files",
+    "Both must be on the same filesystem",
+    "Unable to unmount the stale on-demand mount",
+    "Unable to prepare the on-demand 'sync_dir'",
+    "') is not a directory",
+)
+START_REFUSAL_RECHECK = 15  # seconds
+
+
+def parse_start_refusal(journal_text):
+    """
+    The client's start refusal in the unit's latest start attempt (`journalctl -o cat` output), or "".
+    Only lines after systemd's last "Starting ..." line count, so an old refusal is not shown again.
+    """
+    lines = journal_text.splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith("Starting ")]
+    for line in reversed(lines[starts[-1] + 1 :] if starts else lines):
+        text = line.split("ERROR:", 1)[1].strip() if "ERROR:" in line else ""
+        if text and any(pattern in text for pattern in START_REFUSAL_PATTERNS):
+            return text
+    return ""
+
+
+class StartRefusals(QObject):
+    """Why a unit's client refuses to start, read from its journal; rechecked at most every 15 s."""
+
+    changed = Signal(str)  # unit
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.refusals = {}  # unit -> text
+        self.checked = {}  # unit -> time
+        self.running = set()
+
+    def get(self, unit):
+        return self.refusals.get(unit, "")
+
+    def clear(self, unit):
+        self.checked.pop(unit, None)
+        if self.refusals.pop(unit, ""):
+            self.changed.emit(unit)
+
+    def check(self, unit):
+        if not unit or unit in self.running or time.time() - self.checked.get(unit, 0) < START_REFUSAL_RECHECK:
+            return
+        self.running.add(unit)
+        self.checked[unit] = time.time()
+        process = QProcess(self)
+
+        def finished(_exit_code, _status):
+            text = parse_start_refusal(bytes(process.readAllStandardOutput()).decode(errors="replace"))
+            process.deleteLater()
+            self.running.discard(unit)
+            if text != self.refusals.get(unit, ""):
+                self.refusals[unit] = text
+                self.changed.emit(unit)
+
+        process.finished.connect(finished)
+        process.start(journalctl(), ["--user", "-u", unit, "-n", "60", "-o", "cat", "--no-pager"])
+
+
 def profile_mode(profile_config, instance=None, gui_owns_worker=False, unit_states=None):
     """
     Facts shown wherever a profile appears.

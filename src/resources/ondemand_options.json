@@ -1,6 +1,6 @@
 {
   "source": "ondemand/OPTIONS.md",
-  "source_commit": "d2f488b6df7713f30c5f1316aa5a9eb43a560861",
+  "source_commit": "14b324664ceb891b5abf713b2bc83e2577ce6bfb",
   "options": {
     "application_id": {
       "class": "relevant",
@@ -25,12 +25,12 @@
     "check_nomount": {
       "class": "ignored",
       "resync": false,
-      "notes": "Checks for .nosync in the working directory, which is the backing dir under the confdir."
+      "notes": "Checks for .nosync in the physical sync_dir, as in normal mode."
     },
     "check_nosync": {
       "class": "relevant",
       "resync": true,
-      "notes": ".nosync in a folder of the backing dir (created through the mount) protects it as in normal mode."
+      "notes": ".nosync in a folder of sync_dir (created through the mount) protects it as in normal mode."
     },
     "classify_as_big_delete": {
       "class": "relevant",
@@ -268,9 +268,9 @@
       "notes": "Requires --monitor."
     },
     "on_demand_backing_dir": {
-      "class": "relevant-ondemand",
-      "resync": true,
-      "notes": "The local folder that holds downloaded files; changing it requires --resync."
+      "class": "ignored",
+      "resync": false,
+      "notes": "Deprecated: hydrated files are kept in sync_dir; only used once to move an old backing directory into sync_dir."
     },
     "on_demand_cli_download": {
       "class": "refused",
@@ -325,7 +325,7 @@
     "recycle_bin_path": {
       "class": "risky",
       "resync": false,
-      "notes": "Refused inside sync_dir (the mount) or the backing dir."
+      "notes": "Refused inside sync_dir."
     },
     "remove_source_files": {
       "class": "ignored",
@@ -390,17 +390,17 @@
     "sync_dir": {
       "class": "relevant-ondemand",
       "resync": false,
-      "notes": "The mountpoint; changing it needs no --resync in on-demand mode (it does in normal mode) as long as on_demand_backing_dir is unchanged."
+      "notes": "Holds the hydrated files with the mount on top; changing it moves the folder (same filesystem), otherwise --resync is required."
     },
     "sync_dir_permissions": {
       "class": "relevant",
       "resync": false,
-      "notes": "Applied to backing-dir folders created by the engine."
+      "notes": "Applied to folders the engine creates in sync_dir."
     },
     "sync_file_permissions": {
       "class": "relevant",
       "resync": false,
-      "notes": "Applied to downloaded/hydrated backing files and visible through the mount (lstat)."
+      "notes": "Applied to downloaded/hydrated files and visible through the mount (lstat)."
     },
     "sync_root_files": {
       "class": "relevant",
@@ -435,7 +435,7 @@
     "use_recycle_bin": {
       "class": "risky",
       "resync": false,
-      "notes": "Online deletions move local files to the recycle bin; a recycle bin inside sync_dir (the mount) or the backing dir is refused."
+      "notes": "Online deletions move local files to the recycle bin; a recycle bin inside sync_dir is refused."
     },
     "user_agent": {
       "class": "relevant",
@@ -485,7 +485,7 @@
     "write_xattr_data": {
       "class": "relevant",
       "resync": false,
-      "notes": "Writes user.onedrive.createdBy / user.onedrive.lastModifiedBy on backing files after download (sync.d:5388-5389)."
+      "notes": "Writes user.onedrive.createdBy / user.onedrive.lastModifiedBy on hydrated files after download (sync.d:5388-5389)."
     }
   }
 }

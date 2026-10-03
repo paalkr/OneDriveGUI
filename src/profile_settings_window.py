@@ -28,7 +28,7 @@ from configparser import ConfigParser
 # Import setup_wizard after importing wizard, keeping it at the bottom to avoid circular imports
 import wizard
 from global_config import RESYNC_RELEVANT_KEYS, changed_config_keys, is_client_owned, save_global_config
-from ondemand_dbus import is_ondemand_profile, profile_confdir, profile_systemd_unit
+from ondemand_dbus import is_ondemand_profile, mount_move_problem, profile_confdir, profile_systemd_unit
 from ondemand_options import HIDDEN_CLASSES, load_options_table
 
 # Import main_window (lazy import to avoid circular references)
@@ -760,7 +760,19 @@ class ProfileSettingsPage(QWidget, Ui_profile_settings):
         unit = profile_systemd_unit(profile)
         window = getattr(main_window, "main_window_instance", None)
         running = bool(unit and window and window.profile_mode(self.profile)["active"] in ("active", "activating", "reloading"))
-        text = f"The folder <b>{old}</b> is unmounted and the files appear at <b>{new}</b> after the service restarts."
+        problem = mount_move_problem(old, new)
+        if problem:
+            text = (
+                f"The client moves the folder <b>{old}</b> to <b>{new}</b> only when both are on the same filesystem "
+                f"and <b>{new}</b> is empty or does not exist yet. Here {problem}, so the background service would "
+                "refuse to start, and a rebuild (--resync) would be needed.<br><br>Save anyway?"
+            )
+            answer = QMessageBox.question(self, "Move the OneDrive folder ?", text, buttons=QMessageBox.Yes | QMessageBox.No, defaultButton=QMessageBox.No)
+            return (answer == QMessageBox.Yes), None
+        text = (
+            f"When the service restarts, the folder <b>{old}</b> is moved to <b>{new}</b>, with the files you have "
+            "downloaded; online-only files appear there too. Nothing is downloaded, uploaded or deleted by the move."
+        )
         if running:
             text += f"<br><br>Save and restart <b>{unit}</b> now?"
         else:
